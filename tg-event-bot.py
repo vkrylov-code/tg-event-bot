@@ -18,16 +18,16 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8443))
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
-if not TOKEN:
-    logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
-    raise SystemExit("BOT_TOKEN is required")
+if not TOKEN or not WEBHOOK_URL:
+    logger.error("Не заданы обязательные переменные BOT_TOKEN или WEBHOOK_URL")
+    raise SystemExit("BOT_TOKEN и WEBHOOK_URL обязательны")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
-    logger.error("Не задана переменная окружения DATABASE_URL. Прекращаю запуск.")
-    raise SystemExit("DATABASE_URL is required")
+    logger.error("Не задана переменная окружения DATABASE_URL")
+    raise SystemExit("DATABASE_URL обязательна")
 
-# --- Хранилище событий в памяти ---
+# --- Хранилище событий ---
 events = {}
 
 # --- Клавиатура ---
@@ -107,22 +107,17 @@ def save_event(event_id, event):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
                 data JSONB
             )
-            """
-        )
-        cur.execute(
-            """
+        """)
+        cur.execute("""
             INSERT INTO events (event_id, data)
             VALUES (%s, %s)
             ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-            """,
-            (event_id, Json(event_copy))
-        )
+        """, (event_id, Json(event_copy)))
         conn.commit()
         cur.close()
         conn.close()
@@ -170,7 +165,7 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_names": {},
         "closed": False
     }
-    
+
     save_event(event_id, events[event_id])
     logger.info("Создано событие id=%s by %s: %s", event_id, update.effective_user.full_name, text)
 
@@ -196,7 +191,6 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     try:
         event_id, btn = query.data.split("|", 1)
     except ValueError:
@@ -230,13 +224,11 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     event["lists"][k].discard(user_id)
             event["lists"][btn].add(user_id)
             if btn != "Я буду":
-                # Убираем плюсы конкретного пользователя, если он не идёт
                 event["plus_counts"].pop(user_id, None)
         elif btn == "Плюс":
             if user_id in event["lists"]["Я буду"]:
                 event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
             else:
-                # Анонимный плюс
                 event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
         elif btn == "Минус":
             if user_id in event["lists"]["Я буду"]:
@@ -245,7 +237,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if event["plus_counts"][user_id] <= 0:
                         event["plus_counts"].pop(user_id)
             else:
-                # Минус для анонимного плюса
                 if "anon" in event["plus_counts"]:
                     event["plus_counts"]["anon"] -= 1
                     if event["plus_counts"]["anon"] <= 0:
@@ -271,15 +262,16 @@ def main():
     application.add_handler(CommandHandler("new_event", new_event))
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
-    
-    # Запуск через webhook
-    PORT = int(os.environ.get("PORT", 8443))
-    URL = os.environ.get("WEBHOOK_URL")  # публичный URL Render
 
+    # Установка webhook
+    logger.info("Setting webhook to %s/webhook/%s", WEBHOOK_URL, TOKEN)
+    application.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
+
+    # Запуск webhook
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=f"{URL}/webhook/{TOKEN}"
+        webhook_path=f"/webhook/{TOKEN}"
     )
 
 if __name__ == "__main__":
