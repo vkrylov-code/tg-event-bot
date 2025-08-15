@@ -236,17 +236,12 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if btn != "Я буду":
                 event["plus_counts"].pop(user_id, None)
         elif btn == "Плюс":
-            # Увеличиваем счётчик
             event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
-            logger.info("Plus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
         elif btn == "Минус":
-    if user_id in event["plus_counts"]:
-        event["plus_counts"][user_id] -= 1
-        if event["plus_counts"][user_id] <= 0:
-            event["plus_counts"].pop(user_id, None)
-            logger.info("Plus count reached 0 => removed plus entry for %s (event %s)", user_name, event_id)
-        else:
-            logger.info("Minus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
+            if user_id in event["plus_counts"]:
+                event["plus_counts"][user_id] -= 1
+                if event["plus_counts"][user_id] <= 0:
+                    event["plus_counts"].pop(user_id, None)
 
     save_event(event_id, event)
     new_text = format_event(event_id)
