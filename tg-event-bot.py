@@ -74,7 +74,6 @@ def build_keyboard(event):
     return InlineKeyboardMarkup(keyboard)
 
 def render_message(event):
-    """Создаёт текст события с итогами с кликабельными именами и переносами строк"""
     text = event.get("text", "Событие").strip()
     lines = [text, "\n-----------------"]
 
@@ -86,12 +85,9 @@ def render_message(event):
         status = info.get("status")
         plus_count = info.get("plus", 0)
         user_id = info.get("id")
-
-        # Если есть user_id, делаем имя кликабельным
         display_name = f"[{user}](tg://user?id={user_id})" if user_id else user
         if status == "going" and plus_count:
             display_name += f" +{plus_count}"
-
         if status == "going":
             going_list.append(display_name)
         elif status == "not_going":
@@ -117,7 +113,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args) or "Новое событие"
-    text = text.replace("\\n", "\n")  # Поддержка переносов через \n
+    text = text.replace("\\n", "\n")
     event_id = str(update.message.message_id)
     event = {
         "text": text,
@@ -148,7 +144,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     info = event.setdefault("users", {}).setdefault(user, {"status": None, "plus": 0, "id": user_id})
 
-    # Обновление статусов
     if query.data in ["going", "not_going", "thinking"]:
         info["status"] = query.data
         if query.data != "going":
@@ -157,9 +152,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info["plus"] += 1
         if info["status"] != "going":
             info["status"] = "going"
-    elif query.data == "minus":
-        if info["plus"] > 0:
-            info["plus"] -= 1
+    elif query.data == "minus" and info["plus"] > 0:
+        info["plus"] -= 1
     elif query.data == "close":
         event["closed"] = True
 
@@ -222,6 +216,7 @@ if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8443))
     URL = os.environ.get("APP_URL")
 
+    # Рабочий запуск webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
