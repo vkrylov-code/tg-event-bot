@@ -1,5 +1,5 @@
-import logging
 import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -58,7 +58,7 @@ def get_keyboard(event_id, closed=False):
 def format_event(event_id):
     event = events[event_id]
     text = f"<b>{event['title']}</b>\n\n"
-    for btn in event["lists"].keys():
+    for btn in ["Я буду", "Я не иду", "Думаю"]:
         members_list = []
         for member in event["lists"][btn]:
             if btn == "Я буду":
@@ -70,7 +70,7 @@ def format_event(event_id):
         text += f"<b>{btn}:</b>\n{members}\n\n"
 
     total_go = len(event["lists"]["Я буду"]) + sum(event["plus_counts"].values())
-    total_yes = len(event["lists"]["Я буду"]) + sum(event["plus_counts"].values())
+    total_yes = total_go
     total_no = len(event["lists"]["Я не иду"])
     total_think = len(event["lists"]["Думаю"])
 
@@ -117,7 +117,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             event["plus_counts"].pop(user_name, None)
 
     elif btn == "Плюс":
-        # Переносит пользователя в "Я буду"
         event["lists"]["Думаю"].discard(user_name)
         event["lists"]["Я не иду"].discard(user_name)
         event["lists"]["Я буду"].add(user_name)
@@ -137,13 +136,19 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 if __name__ == "__main__":
-    # TOKEN = "TOKEN"
-    TOKEN = os.getenv("BOT_TOKEN")
+    TOKEN = os.environ.get("BOT_TOKEN")
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+    PORT = int(os.environ.get("PORT", 8443))
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("create", create_event))
     app.add_handler(CallbackQueryHandler(button_click))
 
-    logger.info("Бот запущен...")
-    app.run_polling()
+    logger.info("Бот запущен через webhook...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL
+    )
