@@ -28,6 +28,23 @@ if not TOKEN:
 def get_db_conn():
     return psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
 
+def init_db():
+    try:
+        conn = get_db_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL
+                )
+            """)
+            conn.commit()
+        conn.close()
+        logger.info("Таблица events готова")
+    except Exception as e:
+        logger.exception("Ошибка инициализации БД: %s", e)
+        raise
+
 # --- Загрузка всех событий из БД при старте ---
 events = {}
 def load_events():
@@ -178,6 +195,31 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=get_keyboard(event_id)
     )
+    
+# --- Новый хэндлер ---
+async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        return
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав на просмотр событий.")
+        return
+
+    if not events:
+        await update.message.reply_text("Событий пока нет.")
+        return
+
+    lines = []
+    for event_id, event in events.items():
+        text = html.escape(event["text"].replace("\n", " "))
+        total_yes = len(event["lists"]["Я буду"])
+        total_no = len(event["lists"]["Я не иду"])
+        total_think = len(event["lists"]["Думаю"])
+        total_plus = sum(event["plus_counts"].values())
+        closed = "⚠️ Закрыт" if event["closed"] else "🟢 Открыт"
+        lines.append(f"<b>{text}</b>\nID: <code>{event_id}</code>\n✅ {total_yes} + {total_plus} | ❌ {total_no} | 🤔 {total_think} | {closed}\n---")
+
+    message = "\n".join(lines)
+    await update.message.reply_text(message, parse_mode="HTML")
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -243,11 +285,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main ---
 def main():
+    init_db()
     load_events()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new_event", new_event))
     app.add_handler(CallbackQueryHandler(button_click))
+    app.add_handler(CommandHandler("list_events", list_events))
 
     logger.info("Starting webhook, URL=%s, PORT=%s", WEBHOOK_URL, PORT)
     app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
