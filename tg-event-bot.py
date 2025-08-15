@@ -14,20 +14,20 @@ logger = logging.getLogger(__name__)
 
 # --- Конфиг из окружения ---
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # публичный URL вашего сервера
 PORT = int(os.environ.get("PORT", 8443))
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
 if not TOKEN or not WEBHOOK_URL:
-    logger.error("Не заданы обязательные переменные BOT_TOKEN или WEBHOOK_URL")
+    logger.error("Не заданы BOT_TOKEN или WEBHOOK_URL")
     raise SystemExit("BOT_TOKEN и WEBHOOK_URL обязательны")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     logger.error("Не задана переменная окружения DATABASE_URL")
-    raise SystemExit("DATABASE_URL обязательна")
+    raise SystemExit("DATABASE_URL is required")
 
-# --- Хранилище событий ---
+# --- Хранилище событий в памяти ---
 events = {}
 
 # --- Клавиатура ---
@@ -100,10 +100,7 @@ def format_event(event_id: str) -> str:
 
 # --- База данных ---
 def save_event(event_id, event):
-    event_copy = {
-        **event,
-        "lists": {k: list(v) for k, v in event["lists"].items()}
-    }
+    event_copy = {**event, "lists": {k: list(v) for k, v in event["lists"].items()}}
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -151,12 +148,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
-    text = raw
-    if raw.startswith("/new_event"):
-        text = raw[len("/new_event"):].strip()
+    text = raw[len("/new_event"):].strip() if raw.startswith("/new_event") else raw
     if not text:
         text = "Событие (без названия)"
-
     event_id = uuid4().hex
     events[event_id] = {
         "text": text,
@@ -165,10 +159,8 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_names": {},
         "closed": False
     }
-
     save_event(event_id, events[event_id])
     logger.info("Создано событие id=%s by %s: %s", event_id, update.effective_user.full_name, text)
-
     await update.message.reply_text(
         format_event(event_id),
         parse_mode="HTML",
@@ -196,7 +188,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         logger.warning("Bad callback_data: %s", query.data)
         return
-
     event = events.get(event_id)
     if not event:
         await query.answer("Событие не найдено.", show_alert=True)
@@ -263,15 +254,11 @@ def main():
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
 
-    full_webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-    logger.info("Setting webhook to %s", full_webhook_url)
-    application.bot.set_webhook(full_webhook_url)
-
-    # Запуск webhook
+    # Настройка webhook
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=full_webhook_url
+        webhook_url=f"{WEBHOOK_URL}/webhook/{TOKEN}"
     )
 
 if __name__ == "__main__":
