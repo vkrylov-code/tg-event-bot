@@ -1,127 +1,118 @@
 import os
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from uuid import uuid4
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # например https://mybot.onrender.com/<secret_path>
 
+# Хранилище событий
 events = {}
 
-BUTTONS_FIRST_ROW = [
-    ("✅ Я буду", "Я буду"),
-    ("❌ Я не иду", "Я не иду"),
-    ("🤔 Думаю", "Думаю")
-]
+# Формирование клавиатуры
+def get_keyboard(event_id, closed=False):
+    if closed:
+        return None
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
+            InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
+            InlineKeyboardButton("🤔 Думаю", callback_data=f"{event_id}|Думаю")
+        ],
+        [
+            InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
+            InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
+            InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор")
+        ]
+    ])
 
-BUTTONS_SECOND_ROW = [
-    ("➕ Плюс", "Плюс"),
-    ("➖ Минус", "Минус"),
-    ("🔒 Закрыть сбор", "Закрыть сбор")
-]
+# Форматирование текста события
+def format_event(event_id):
+    event = events[event_id]
+    text = event["text"]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Создай событие командой /create Название события\n"
-        "Можно использовать переносы строк с помощью \\n"
-    )
+    # Основные списки
+    lists = event["lists"]
+    plus_counts = event["plus_counts"]
 
-async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Укажи название события: /create Первая строка\\nВторая строка")
-        return
+    def format_users(users):
+        result = []
+        for user in users:
+            if user in plus_counts:
+                result.append(f"{user} +{plus_counts[user]}")
+            else:
+                result.append(user)
+        return result
 
-    title = " ".join(context.args).replace("\\n", "\n")
-    event_id = str(len(events) + 1)
+    parts = []
+    if lists["Я буду"]:
+        parts.append("\n<b>✅ Я буду:</b>\n" + "\n".join(format_users(lists["Я буду"])))
+    if lists["Я не иду"]:
+        parts.append("\n<b>❌ Я не иду:</b>\n" + "\n".join(lists["Я не иду"]))
+    if lists["Думаю"]:
+        parts.append("\n<b>🤔 Думаю:</b>\n" + "\n".join(lists["Думаю"]))
+
+    # Итоговый блок
+    total_count = len(lists["Я буду"]) + sum(plus_counts.values())
+    summary = [
+        "-----------------",
+        f"Всего идут: {total_count}",
+        f"✅ {len(lists['Я буду']) + sum(plus_counts.values())}",
+        f"❌ {len(lists['Я не иду'])}",
+        f"🤔 {len(lists['Думаю'])}"
+    ]
+
+    return text + "\n" + "\n".join(parts) + "\n" + "\n".join(summary)
+
+# Команда /new_event
+async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    event_id = str(uuid4())
+    text = " ".join(context.args) if context.args else "Событие без названия"
+    text = update.message.text.replace("/new_event", "").strip()
+
     events[event_id] = {
-        "title": title,
-        "lists": {btn[1]: set() for btn in BUTTONS_FIRST_ROW + BUTTONS_SECOND_ROW[:-1]},
+        "text": text,
+        "lists": {"Я буду": set(), "Я не иду": set(), "Думаю": set()},
         "plus_counts": {},
         "closed": False
     }
 
     await update.message.reply_text(
-        f"Событие создано:\n<b>{title}</b>",
-        parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
+        format_event(event_id),
+        reply_markup=get_keyboard(event_id),
+        parse_mode="HTML"
     )
 
-def get_keyboard(event_id, closed=False):
-    if closed:
-        return InlineKeyboardMarkup([])
-    keyboard = [
-        [InlineKeyboardButton(text=text, callback_data=f"{event_id}|{data}") for text, data in BUTTONS_FIRST_ROW],
-        [InlineKeyboardButton(text=text, callback_data=f"{event_id}|{data}") for text, data in BUTTONS_SECOND_ROW]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def format_event(event_id):
-    event = events[event_id]
-    text = f"<b>{event['title']}</b>\n\n"
-    for btn in ["Я буду", "Я не иду", "Думаю"]:
-        members_list = []
-        for member in event["lists"][btn]:
-            if btn == "Я буду":
-                count = event["plus_counts"].get(member, 0)
-                members_list.append(f"{member}" + (f" +{count}" if count > 0 else ""))
-            else:
-                members_list.append(member)
-        members = "\n".join(members_list) if members_list else "—"
-        text += f"<b>{btn}:</b>\n{members}\n\n"
-
-    total_go = len(event["lists"]["Я буду"]) + sum(event["plus_counts"].values())
-    total_yes = total_go
-    total_no = len(event["lists"]["Я не иду"])
-    total_think = len(event["lists"]["Думаю"])
-
-    text += "-----------------\n"
-    text += f"Всего идут: {total_go}\n"
-    text += f"✅ {total_yes}\n"
-    text += f"❌ {total_no}\n"
-    text += f"🤔 {total_think}\n"
-
-    if event["closed"]:
-        text += "⚠️ Сбор закрыт."
-    return text
-
+# Обработка кнопок
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     event_id, btn = query.data.split("|")
     event = events.get(event_id)
     if not event:
         return
 
     user_name = query.from_user.full_name
+    old_text = format_event(event_id)
 
     if btn == "Закрыть сбор":
         event["closed"] = True
-        await query.edit_message_text(
-            text=format_event(event_id),
-            parse_mode="HTML",
-            reply_markup=get_keyboard(event_id, closed=True)
-        )
-        return
-
-    if event["closed"]:
+    elif event["closed"]:
         await query.answer("Сбор уже закрыт!", show_alert=True)
         return
-
-    # Пользователь может быть только в одном статусе из трех
-    if btn in ["Я буду", "Я не иду", "Думаю"]:
+    elif btn in ["Я буду", "Я не иду", "Думаю"]:
         for key in ["Я буду", "Я не иду", "Думаю"]:
             if key != btn:
                 event["lists"][key].discard(user_name)
         event["lists"][btn].add(user_name)
         if btn != "Я буду":
             event["plus_counts"].pop(user_name, None)
-
     elif btn == "Плюс":
         event["lists"]["Думаю"].discard(user_name)
         event["lists"]["Я не иду"].discard(user_name)
         event["lists"]["Я буду"].add(user_name)
         event["plus_counts"][user_name] = event["plus_counts"].get(user_name, 0) + 1
-
     elif btn == "Минус":
         if user_name in event["plus_counts"]:
             event["plus_counts"][user_name] -= 1
@@ -129,26 +120,34 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 event["plus_counts"].pop(user_name)
                 event["lists"]["Я буду"].discard(user_name)
 
+    new_text = format_event(event_id)
+
+    if new_text == old_text:
+        return
+
     await query.edit_message_text(
-        text=format_event(event_id),
+        text=new_text,
         parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
+        reply_markup=get_keyboard(event_id, closed=event["closed"])
     )
 
-if __name__ == "__main__":
-    TOKEN = os.environ.get("BOT_TOKEN")
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-    PORT = int(os.environ.get("PORT", 8443))
+# Старт
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Используй /new_event <текст> для создания события.")
 
+def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("create", create_event))
+    app.add_handler(CommandHandler("new_event", new_event))
     app.add_handler(CallbackQueryHandler(button_click))
 
-    logger.info("Бот запущен через webhook...")
+    # Запуск вебхука
     app.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
+        port=int(os.environ.get("PORT", 8443)),
         webhook_url=WEBHOOK_URL
     )
+
+if __name__ == "__main__":
+    main()
