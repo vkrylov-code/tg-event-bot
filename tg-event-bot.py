@@ -136,7 +136,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 if __name__ == "__main__":
-    TOKEN = "TOKEN"
+    # TOKEN = "TOKEN"
+    TOKEN = os.getenv("BOT_TOKEN")
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
