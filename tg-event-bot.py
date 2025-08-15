@@ -2,10 +2,11 @@ import os
 import html
 import logging
 from uuid import uuid4
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
 
 # --- Логи ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # например https://myapp.onrender.com/secret123
 PORT = int(os.environ.get("PORT", 8443))
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Ваш Telegram ID
+DATABASE_URL = os.environ["DATABASE_URL"]
+
 
 if not TOKEN:
     logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
@@ -22,6 +26,46 @@ if not TOKEN:
 
 if not WEBHOOK_URL:
     logger.warning("WEBHOOK_URL не задан. Убедись, что переменная окружения установлена (Render).")
+
+# -----------------------------
+# PostgreSQL
+# -----------------------------
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+def init_db():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id SERIAL PRIMARY KEY,
+            event_id TEXT UNIQUE NOT NULL,
+            data JSONB NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """)
+        conn.commit()
+
+def save_event(event_id, data):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        INSERT INTO events (event_id, data, created_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
+        """, (event_id, Json(data)))
+        conn.commit()
+
+def load_event(event_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT data FROM events WHERE event_id = %s", (event_id,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+def delete_old_events():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM events WHERE created_at < %s", 
+                    (datetime.utcnow() - timedelta(days=90),))
+        conn.commit()
+
 
 # --- Хранилище событий в памяти ---
 # events: {event_id: {
@@ -143,7 +187,9 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_names": {},       # {user_id: full_name}
         "closed": False
     }
-
+    
+    save_event(event_id, event) # Сохранение события в БД
+    
     logger.info("Создано событие id=%s by %s: %s", event_id, update.effective_user.full_name, text)
 
     await update.message.reply_text(
@@ -172,45 +218,40 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     user_name = query.from_user.full_name
-    # сохраняем/обновляем имя
-    event["user_names"][user_id] = user_name
+    event["user_names"][user_id] = user_name  # сохраняем/обновляем имя
 
     old_text = format_event(event_id)
     old_markup_present = bool(query.message.reply_markup and getattr(query.message.reply_markup, "inline_keyboard", None))
 
     # --- Обработка кнопок ---
+    changed = False  # флаг изменений
+
     if btn == "Закрыть сбор":
         if event["closed"]:
             await query.answer("Сбор уже закрыт.", show_alert=True)
-            logger.info("Close called but already closed: %s", event_id)
             return
         event["closed"] = True
+        changed = True
         logger.info("Сбор закрыт: %s by %s", event_id, user_name)
 
     else:
         if event["closed"]:
             await query.answer("Сбор уже закрыт!", show_alert=True)
-            logger.info("Click after closed: %s by %s", event_id, user_name)
             return
 
-        # Статусы (пользователь только в одном из трёх)
         if btn in ["Я буду", "Я не иду", "Думаю"]:
-            # Удаляем пользователя из других статусов
             for k in ["Я буду", "Я не иду", "Думаю"]:
                 if k != btn:
                     event["lists"][k].discard(user_id)
-            # Добавляем в выбранный статус
             event["lists"][btn].add(user_id)
-            logger.info("User %s set status %s (event %s)", user_name, btn, event_id)
-            # Если выбрал не "Я буду" — удаляем его плюсы (как раньше)
             if btn != "Я буду":
-                if user_id in event["plus_counts"]:
-                    logger.debug("Removing plus_counts for %s because selected %s", user_name, btn)
                 event["plus_counts"].pop(user_id, None)
+            changed = True
+            logger.info("User %s set status %s (event %s)", user_name, btn, event_id)
 
         elif btn == "Плюс":
-            # Увеличиваем счётчик. ВАЖНО: теперь не перемещаем автоматически в "Я буду".
             event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
+            changed = True
             logger.info("Plus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
 
         elif btn == "Минус":
@@ -218,40 +259,35 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 event["plus_counts"][user_id] -= 1
                 if event["plus_counts"][user_id] <= 0:
                     event["plus_counts"].pop(user_id, None)
-                    logger.info("Plus count reached 0 => removed plus entry for %s (event %s)", user_name, event_id)
-                else:
-                    logger.info("Minus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
-            else:
-                logger.debug("Minus pressed by %s but no plus entry (event %s)", user_name, event_id)
+                changed = True
+                logger.info("Minus: %s now +%d (event %s)", user_name, event.get("plus_counts", {}).get(user_id, 0), event_id)
+
+    # --- Сохраняем изменения в БД ---
+    if changed:
+        save_event(event_id, event)
 
     new_text = format_event(event_id)
-
-    # Решаем, нужно ли редактировать сообщение:
-    need_edit = False
-    if new_text != old_text:
-        need_edit = True
-    elif old_markup_present and event["closed"]:
-        # текст тот же, но нужно убрать клавиатуру (при закрытии)
-        need_edit = True
-
-    if not need_edit:
-        logger.debug("No edit required for event %s", event_id)
-        return
-
+    need_edit = new_text != old_text or (old_markup_present and event["closed"])
     reply_markup = None if event["closed"] else get_keyboard(event_id)
 
-    try:
-        await query.edit_message_text(text=new_text, parse_mode="HTML", reply_markup=reply_markup)
-        logger.info("Message updated for event %s", event_id)
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            logger.info("Edit skipped: message not modified (event %s).", event_id)
-            return
-        logger.exception("BadRequest while editing message: %s", e)
-        raise
+    if need_edit:
+        try:
+            await query.edit_message_text(text=new_text, parse_mode="HTML", reply_markup=reply_markup)
+            logger.info("Message updated for event %s", event_id)
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info("Edit skipped: message not modified (event %s).", event_id)
+                return
+            logger.exception("BadRequest while editing message: %s", e)
+            raise
 
 # --- Запуск приложения (webhook) ---
 def main():
+    
+    init_db()
+    delete_old_events()
+    load_events()
+    
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
