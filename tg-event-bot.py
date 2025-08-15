@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8443))
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Ваш Telegram ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
 if not TOKEN:
     logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
@@ -59,20 +59,19 @@ def format_event(event_id: str) -> str:
 
     # ✅ Я буду
     lines = []
+    total_plus = 0
     for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
         name = user_names.get(uid, "User")
         link = format_user_link(uid, name)
         cnt = plus_counts.get(uid, 0)
+        total_plus += cnt
         lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
     parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
     # Анонимные плюсы (только плюсы, не "Я буду")
-    anon_lines = []
-    for uid, cnt in sorted(plus_counts.items()):
-        if uid not in lists["Я буду"]:
-            anon_lines.append(f"— +{cnt}")
-    if anon_lines:
-        parts.append("\n".join(anon_lines))
+    anon_total = sum(cnt for uid, cnt in plus_counts.items() if uid not in lists["Я буду"])
+    if anon_total > 0:
+        parts.append(f"— Анонимные плюсы: +{anon_total}")
 
     # ❌ Я не иду
     lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
@@ -84,9 +83,7 @@ def format_event(event_id: str) -> str:
 
     # Итоги
     total_yes_people = len(lists["Я буду"])
-    total_plus_count = sum(plus_counts.get(uid, 0) for uid in lists["Я буду"])
-    total_anon_plus = sum(plus_counts.get(uid, 0) for uid in plus_counts if uid not in lists["Я буду"])
-    total_go = total_yes_people + total_plus_count + total_anon_plus
+    total_go = total_yes_people + total_plus + anon_total
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
 
@@ -141,7 +138,6 @@ def load_events():
         for row in rows:
             event_id = row["event_id"]
             data = row["data"]
-            # Списки обратно в set
             data["lists"] = {k: set(v) for k, v in data["lists"].items()}
             events[event_id] = data
         cur.close()
@@ -236,12 +232,23 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if btn != "Я буду":
                 event["plus_counts"].pop(user_id, None)
         elif btn == "Плюс":
-            event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
+            if user_id in event["lists"]["Я буду"]:
+                # Пользователь уже идёт — плюсы к его имени
+                event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
+            else:
+                # Анонимный плюс
+                anon_key = f"anon_{uuid4().hex}"
+                event["plus_counts"][anon_key] = 1
         elif btn == "Минус":
-            if user_id in event["plus_counts"]:
-                event["plus_counts"][user_id] -= 1
-                if event["plus_counts"][user_id] <= 0:
-                    event["plus_counts"].pop(user_id, None)
+            # Минусы убираются как у "Я буду", так и у анонимов
+            to_remove = []
+            for uid, cnt in event["plus_counts"].items():
+                if (uid == user_id) or (str(uid).startswith("anon_")):
+                    event["plus_counts"][uid] -= 1
+                    if event["plus_counts"][uid] <= 0:
+                        to_remove.append(uid)
+            for uid in to_remove:
+                event["plus_counts"].pop(uid, None)
 
     save_event(event_id, event)
     new_text = format_event(event_id)
@@ -258,23 +265,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Запуск приложения ---
 def main():
     load_events()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("new_event", new_event))
-    app.add_handler(CommandHandler("show_events", show_events))
-    app.add_handler(CallbackQueryHandler(button_click))
-
-    # Для вебхука (если используешь Render)
-    if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-        )
-    else:
-        # Для polling
-        app.run_polling()
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("new_event", new_event))
+    application.add_handler(CommandHandler("events", show_events))
+    application.add_handler(CallbackQueryHandler(button_click))
+    
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
