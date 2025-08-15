@@ -287,7 +287,7 @@ def main():
     
     init_db()
     delete_old_events()
-    load_events()
+    load_event()
     
     app = Application.builder().token(TOKEN).build()
 
