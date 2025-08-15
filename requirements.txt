@@ -1,2 +1,11 @@
-python-telegram-bot[webhooks]==20.4
-psycopg2-binary==2.9.9
+# Библиотека для работы с Telegram Bot API
+python-telegram-bot[webhooks]==20.6
+
+# Асинхронная работа
+aiohttp==3.9.4
+
+# Работа с PostgreSQL
+psycopg2-binary>=2.9
+
+# Логирование (опционально)
+loguru==0.7.0
