@@ -59,19 +59,17 @@ def format_event(event_id: str) -> str:
 
     # ✅ Я буду
     lines = []
-    total_plus = 0
     for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
         name = user_names.get(uid, "User")
         link = format_user_link(uid, name)
         cnt = plus_counts.get(uid, 0)
-        total_plus += cnt
         lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
     parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
-    # Анонимные плюсы (только плюсы, не "Я буду")
-    anon_total = sum(cnt for uid, cnt in plus_counts.items() if uid not in lists["Я буду"])
-    if anon_total > 0:
-        parts.append(f"— Анонимные плюсы: +{anon_total}")
+    # Анонимные плюсы
+    anon_count = plus_counts.get("anon", 0)
+    if anon_count > 0:
+        parts.append(f"— +{anon_count}")
 
     # ❌ Я не иду
     lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
@@ -83,7 +81,9 @@ def format_event(event_id: str) -> str:
 
     # Итоги
     total_yes_people = len(lists["Я буду"])
-    total_go = total_yes_people + total_plus + anon_total
+    total_plus_count = sum(plus_counts.get(uid, 0) for uid in lists["Я буду"])
+    total_anon_plus = plus_counts.get("anon", 0)
+    total_go = total_yes_people + total_plus_count + total_anon_plus
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
 
@@ -230,25 +230,26 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     event["lists"][k].discard(user_id)
             event["lists"][btn].add(user_id)
             if btn != "Я буду":
+                # Убираем плюсы конкретного пользователя, если он не идёт
                 event["plus_counts"].pop(user_id, None)
         elif btn == "Плюс":
             if user_id in event["lists"]["Я буду"]:
-                # Пользователь уже идёт — плюсы к его имени
                 event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
             else:
                 # Анонимный плюс
-                anon_key = f"anon_{uuid4().hex}"
-                event["plus_counts"][anon_key] = 1
+                event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
         elif btn == "Минус":
-            # Минусы убираются как у "Я буду", так и у анонимов
-            to_remove = []
-            for uid, cnt in event["plus_counts"].items():
-                if (uid == user_id) or (str(uid).startswith("anon_")):
-                    event["plus_counts"][uid] -= 1
-                    if event["plus_counts"][uid] <= 0:
-                        to_remove.append(uid)
-            for uid in to_remove:
-                event["plus_counts"].pop(uid, None)
+            if user_id in event["lists"]["Я буду"]:
+                if user_id in event["plus_counts"]:
+                    event["plus_counts"][user_id] -= 1
+                    if event["plus_counts"][user_id] <= 0:
+                        event["plus_counts"].pop(user_id)
+            else:
+                # Минус для анонимного плюса
+                if "anon" in event["plus_counts"]:
+                    event["plus_counts"]["anon"] -= 1
+                    if event["plus_counts"]["anon"] <= 0:
+                        event["plus_counts"].pop("anon")
 
     save_event(event_id, event)
     new_text = format_event(event_id)
