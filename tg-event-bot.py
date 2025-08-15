@@ -9,8 +9,8 @@ from psycopg2.extras import RealDictCursor, Json
 # -----------------------------
 # НАСТРОЙКИ
 # -----------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из Render
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Ваш Telegram ID
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 logging.basicConfig(level=logging.INFO)
@@ -74,23 +74,30 @@ def build_keyboard(event):
     return InlineKeyboardMarkup(keyboard)
 
 def render_message(event):
-    """Создаёт текст события с итогами"""
-    lines = [event.get("text", "Событие")]
-    lines.append("\n-----------------")
+    """Создаёт текст события с итогами с кликабельными именами и переносами строк"""
+    text = event.get("text", "Событие").strip()
+    lines = [text, "\n-----------------"]
+
     going_list = []
     not_going_list = []
     thinking_list = []
 
     for user, info in event.get("users", {}).items():
-        status = info["status"]
+        status = info.get("status")
         plus_count = info.get("plus", 0)
+        user_id = info.get("id")
+
+        # Если есть user_id, делаем имя кликабельным
+        display_name = f"[{user}](tg://user?id={user_id})" if user_id else user
+        if status == "going" and plus_count:
+            display_name += f" +{plus_count}"
+
         if status == "going":
-            name = f"{user} {'+'+str(plus_count) if plus_count else ''}"
-            going_list.append(name)
+            going_list.append(display_name)
         elif status == "not_going":
-            not_going_list.append(user)
+            not_going_list.append(display_name)
         elif status == "thinking":
-            thinking_list.append(user)
+            thinking_list.append(display_name)
 
     lines.append(f"Всего идут: {len(going_list)}")
     lines.append(f"✅ {len(going_list)}: {', '.join(going_list) if going_list else '-'}")
@@ -103,11 +110,15 @@ def render_message(event):
 # Обработчики команд
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Используй /newevent <текст> для создания события.")
+    await update.message.reply_text(
+        "Привет! Используй /newevent <текст> для создания события.\n"
+        "Поддерживаются переносы строк в описании."
+    )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args) or "Новое событие"
-    event_id = str(update.message.message_id)  # уникальный id на основе message_id
+    text = text.replace("\\n", "\n")  # Поддержка переносов через \n
+    event_id = str(update.message.message_id)
     event = {
         "text": text,
         "users": {},
@@ -116,7 +127,8 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_event(event_id, event)
     await update.message.reply_text(
         render_message(event),
-        reply_markup=build_keyboard(event)
+        reply_markup=build_keyboard(event),
+        parse_mode="Markdown"
     )
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,14 +145,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user.full_name
-    info = event.setdefault("users", {}).setdefault(user, {"status": None, "plus": 0})
+    user_id = query.from_user.id
+    info = event.setdefault("users", {}).setdefault(user, {"status": None, "plus": 0, "id": user_id})
 
-    if query.data == "going":
-        info["status"] = "going"
-    elif query.data == "not_going":
-        info["status"] = "not_going"
-    elif query.data == "thinking":
-        info["status"] = "thinking"
+    # Обновление статусов
+    if query.data in ["going", "not_going", "thinking"]:
+        info["status"] = query.data
+        if query.data != "going":
+            info["plus"] = 0
     elif query.data == "plus":
         info["plus"] += 1
         if info["status"] != "going":
@@ -152,10 +164,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         event["closed"] = True
 
     save_event(event_id, event)
+
     try:
         await query.edit_message_text(
             render_message(event),
-            reply_markup=None if event.get("closed") else build_keyboard(event)
+            reply_markup=None if event.get("closed") else build_keyboard(event),
+            parse_mode="Markdown"
         )
     except Exception as e:
         logger.warning(f"Ошибка обновления сообщения: {e}")
@@ -181,7 +195,12 @@ async def dump(update: Update, context: ContextTypes.DEFAULT_TYPE):
         eid = row["event_id"]
         created = row["created_at"].strftime("%Y-%m-%d %H:%M")
         data = row["data"]
-        text_lines.append(f"ID: {eid} | Создано: {created}\nТекст: {data.get('text')}\nПользователи: {data.get('users')}\nClosed: {data.get('closed')}\n{'-'*20}")
+        text_lines.append(
+            f"ID: {eid} | Создано: {created}\n"
+            f"Текст: {data.get('text')}\n"
+            f"Пользователи: {data.get('users')}\n"
+            f"Closed: {data.get('closed')}\n{'-'*20}"
+        )
 
     full_text = "\n".join(text_lines)
     for i in range(0, len(full_text), 3900):
@@ -198,7 +217,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newevent", new_event))
     app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(CommandHandler("dump", dump))  # скрытая команда
+    app.add_handler(CommandHandler("dump", dump))
 
     PORT = int(os.environ.get("PORT", 8443))
     URL = os.environ.get("APP_URL")
