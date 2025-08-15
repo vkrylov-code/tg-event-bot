@@ -8,8 +8,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # =====================
 # НАСТРОЙКИ
 # =====================
-BOT_TOKEN = "ТОКЕН_ТВОЕГО_БОТА"  # Вставь токен от BotFather
-ADMIN_ID = vi_vk              # Вставь свой Telegram ID
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из переменной окружения Render
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Твой Telegram ID из переменной окружения Render
 DATA_FILE = "/data/events.json"   # Файл для сохранения событий
 
 # =====================
