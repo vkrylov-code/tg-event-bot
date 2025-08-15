@@ -272,7 +272,18 @@ def main():
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
     
-    application.run_polling()
+    # Запуск через webhook
+    from telegram.ext import Webhook
+    import asyncio
+    PORT = int(os.environ.get("PORT", 8443))
+    URL = os.environ.get("WEBHOOK_URL")  # публичный URL Render
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{URL}/webhook/{BOT_TOKEN}"
+    )
+
 
 if __name__ == "__main__":
     main()
