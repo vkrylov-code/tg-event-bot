@@ -59,15 +59,24 @@ def format_event(event_id: str) -> str:
 
     # ✅ Я буду
     if lists["Я буду"]:
-        lines = []
-        for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
-            name = user_names.get(uid, "User")
-            link = format_user_link(uid, name)
-            cnt = plus_counts.get(uid, 0)
-            lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
-        parts.append("<b>✅ Я буду:</b>\n" + "\n".join(lines) + "\n")
-    else:
-        parts.append("<b>✅ Я буду:</b>\n—\n")
+    lines = []
+    for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
+        name = user_names.get(uid, "User")
+        link = format_user_link(uid, name)
+        cnt = plus_counts.get(uid, 0)
+        lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
+    parts.append("<b>✅ Я буду:</b>\n" + "\n".join(lines))
+else:
+    parts.append("<b>✅ Я буду:</b>\n—")
+
+# Анонимные плюсы (пользователи, которые нажали "Плюс", но не "Я буду")
+anon_lines = []
+for uid, cnt in sorted(plus_counts.items()):
+    if uid not in lists["Я буду"]:
+        anon_lines.append(f"— +{cnt}")
+if anon_lines:
+    parts.append("\n".join(anon_lines))
+
 
     # ❌ Я не иду
     if lists["Я не иду"]:
@@ -235,12 +244,17 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if btn != "Я буду":
                 event["plus_counts"].pop(user_id, None)
         elif btn == "Плюс":
+            # Увеличиваем счётчик
             event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
-        elif btn == "Минус":
-            if user_id in event["plus_counts"]:
-                event["plus_counts"][user_id] -= 1
-                if event["plus_counts"][user_id] <= 0:
-                    event["plus_counts"].pop(user_id, None)
+            logger.info("Plus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
+        lif btn == "Минус":
+    if user_id in event["plus_counts"]:
+        event["plus_counts"][user_id] -= 1
+        if event["plus_counts"][user_id] <= 0:
+            event["plus_counts"].pop(user_id, None)
+            logger.info("Plus count reached 0 => removed plus entry for %s (event %s)", user_name, event_id)
+        else:
+            logger.info("Minus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
 
     save_event(event_id, event)
     new_text = format_event(event_id)
