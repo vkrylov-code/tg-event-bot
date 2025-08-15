@@ -1,178 +1,204 @@
+# bot.py
 import os
-from datetime import datetime, timedelta
+import html
 import logging
+from uuid import uuid4
+
+import asyncpg
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import psycopg2
-from psycopg2.extras import RealDictCursor, Json
 
-# -----------------------------
-# НАСТРОЙКИ
-# -----------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
-DATABASE_URL = os.environ["DATABASE_URL"]
-
-logging.basicConfig(level=logging.INFO)
+# --- Логи ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# PostgreSQL
-# -----------------------------
-def get_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+# --- Конфиг из окружения ---
+TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("APP_URL")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
+PORT = int(os.environ.get("PORT", 8443))
+DATABASE_URL = os.environ.get("DATABASE_URL")  # например postgres://user:pass@host:port/dbname
 
-def init_db():
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
+if not TOKEN:
+    logger.error("Не задан BOT_TOKEN")
+    raise SystemExit("BOT_TOKEN required")
+if not DATABASE_URL:
+    logger.error("Не задан DATABASE_URL")
+    raise SystemExit("DATABASE_URL required")
+
+# --- Подключение к базе ---
+db_pool: asyncpg.pool.Pool = None
+
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    # Создаем таблицы, если их нет
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
-            id SERIAL PRIMARY KEY,
-            event_id TEXT UNIQUE NOT NULL,
-            data JSONB NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )
+            event_id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            closed BOOLEAN NOT NULL DEFAULT FALSE
+        );
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            full_name TEXT
+        );
+        CREATE TABLE IF NOT EXISTS event_statuses (
+            event_id TEXT REFERENCES events(event_id),
+            user_id BIGINT REFERENCES users(user_id),
+            status TEXT,
+            plus_count INT DEFAULT 0,
+            PRIMARY KEY (event_id, user_id)
+        );
         """)
-        conn.commit()
 
-def save_event(event_id, data):
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-        INSERT INTO events (event_id, data, created_at)
-        VALUES (%s, %s, NOW())
-        ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-        """, (event_id, Json(data)))
-        conn.commit()
-
-def load_event(event_id):
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT data FROM events WHERE event_id = %s", (event_id,))
-        row = cur.fetchone()
-        return row["data"] if row else None
-
-def delete_old_events():
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM events WHERE created_at < %s", 
-                    (datetime.utcnow() - timedelta(days=90),))
-        conn.commit()
-
-# -----------------------------
-# Логика бота
-# -----------------------------
-def build_keyboard(event):
-    keyboard = [
+# --- Клавиатура ---
+def get_keyboard(event_id):
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Я буду", callback_data="going"),
-            InlineKeyboardButton("❌ Я не иду", callback_data="not_going"),
-            InlineKeyboardButton("🤔 Думаю", callback_data="thinking")
+            InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
+            InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
+            InlineKeyboardButton("🤔 Думаю", callback_data=f"{event_id}|Думаю"),
         ],
         [
-            InlineKeyboardButton("➕ Плюс", callback_data="plus"),
-            InlineKeyboardButton("➖ Минус", callback_data="minus"),
-            InlineKeyboardButton("🛑 Закрыть сбор", callback_data="close")
+            InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
+            InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
+            InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор"),
         ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
-def render_message(event):
-    """Создаёт текст события с итогами с кликабельными именами и переносами строк"""
-    text = event.get("text", "Событие").strip()
-    lines = [text, "\n-----------------"]
+def format_user_link(user_id: int, name: str) -> str:
+    safe = html.escape(name)
+    return f'<a href="tg://user?id={user_id}">{safe}</a>'
 
-    going_list = []
-    not_going_list = []
-    thinking_list = []
+# --- Форматирование события ---
+async def format_event(event_id: str) -> str:
+    async with db_pool.acquire() as conn:
+        event = await conn.fetchrow("SELECT text, closed FROM events WHERE event_id=$1", event_id)
+        statuses = await conn.fetch("SELECT user_id, status, plus_count FROM event_statuses WHERE event_id=$1", event_id)
+        users = {row["user_id"]: (await conn.fetchrow("SELECT full_name FROM users WHERE user_id=$1", row["user_id"]))["full_name"] for row in statuses}
 
-    for user, info in event.get("users", {}).items():
-        status = info.get("status")
-        plus_count = info.get("plus", 0)
-        user_id = info.get("id")
+    lists = {"Я буду": set(), "Я не иду": set(), "Думаю": set()}
+    plus_counts = {}
+    for row in statuses:
+        uid = row["user_id"]
+        stat = row["status"]
+        pc = row["plus_count"]
+        if stat in lists:
+            lists[stat].add(uid)
+        if pc > 0:
+            plus_counts[uid] = pc
 
-        # Если есть user_id, делаем имя кликабельным
-        display_name = f"[{user}](tg://user?id={user_id})" if user_id else user
-        if status == "going" and plus_count:
-            display_name += f" +{plus_count}"
+    parts = [f"<b>{html.escape(event['text'])}</b>\n"]
 
-        if status == "going":
-            going_list.append(display_name)
-        elif status == "not_going":
-            not_going_list.append(display_name)
-        elif status == "thinking":
-            thinking_list.append(display_name)
+    for key in ["Я буду", "Я не иду", "Думаю"]:
+        if lists[key]:
+            lines = []
+            for uid in sorted(lists[key], key=lambda x: users.get(x, "")):
+                link = format_user_link(uid, users.get(uid, "User"))
+                cnt = plus_counts.get(uid, 0)
+                lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
+            parts.append(f"<b>{key}:</b>\n" + "\n".join(lines))
+        else:
+            parts.append(f"<b>{key}:</b>\n—")
 
-    lines.append(f"Всего идут: {len(going_list)}")
-    lines.append(f"✅ {len(going_list)}: {', '.join(going_list) if going_list else '-'}")
-    lines.append(f"❌ {len(not_going_list)}: {', '.join(not_going_list) if not_going_list else '-'}")
-    lines.append(f"🤔 {len(thinking_list)}: {', '.join(thinking_list) if thinking_list else '-'}")
+    total_yes_people = len(lists["Я буду"])
+    total_plus_count = sum(plus_counts.values())
+    total_go = total_yes_people + total_plus_count
+    total_no = len(lists["Я не иду"])
+    total_think = len(lists["Думаю"])
 
-    return "\n".join(lines)
+    parts.append("-----------------")
+    parts.append(f"Всего идут: {total_go}")
+    parts.append(f"✅ {total_go}")
+    parts.append(f"❌ {total_no}")
+    parts.append(f"🤔 {total_think}")
 
-# -----------------------------
-# Обработчики команд
-# -----------------------------
+    if event["closed"]:
+        parts.append("\n⚠️ Сбор закрыт.")
+
+    return "\n".join(parts)
+
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Используй /newevent <текст> для создания события.\n"
-        "Поддерживаются переносы строк в описании."
+        "Привет! Создай событие командой:\n/new_event Текст события"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args) or "Новое событие"
-    text = text.replace("\\n", "\n")  # Поддержка переносов через \n
-    event_id = str(update.message.message_id)
-    event = {
-        "text": text,
-        "users": {},
-        "closed": False
-    }
-    save_event(event_id, event)
+    raw = update.message.text or ""
+    text = raw[len("/new_event"):].strip() if raw.startswith("/new_event") else raw
+    if not text:
+        text = "Событие (без названия)"
+    event_id = uuid4().hex
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO events(event_id, text, closed) VALUES($1,$2,$3)", event_id, text, False)
+
     await update.message.reply_text(
-        render_message(event),
-        reply_markup=build_keyboard(event),
-        parse_mode="Markdown"
+        await format_event(event_id),
+        parse_mode="HTML",
+        reply_markup=get_keyboard(event_id)
     )
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    event_id = str(query.message.message_id)
-    event = load_event(event_id)
-    if not event:
-        await query.edit_message_text("Ошибка: событие не найдено")
-        return
-
-    if event.get("closed"):
-        await query.answer("Сбор закрыт", show_alert=True)
-        return
-
-    user = query.from_user.full_name
-    user_id = query.from_user.id
-    info = event.setdefault("users", {}).setdefault(user, {"status": None, "plus": 0, "id": user_id})
-
-    # Обновление статусов
-    if query.data in ["going", "not_going", "thinking"]:
-        info["status"] = query.data
-        if query.data != "going":
-            info["plus"] = 0
-    elif query.data == "plus":
-        info["plus"] += 1
-        if info["status"] != "going":
-            info["status"] = "going"
-    elif query.data == "minus":
-        if info["plus"] > 0:
-            info["plus"] -= 1
-    elif query.data == "close":
-        event["closed"] = True
-
-    save_event(event_id, event)
-
     try:
-        await query.edit_message_text(
-            render_message(event),
-            reply_markup=None if event.get("closed") else build_keyboard(event),
-            parse_mode="Markdown"
+        event_id, btn = query.data.split("|", 1)
+    except ValueError:
+        return
+    user_id = query.from_user.id
+    user_name = query.from_user.full_name
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users(user_id, full_name) VALUES($1,$2) "
+            "ON CONFLICT (user_id) DO UPDATE SET full_name=EXCLUDED.full_name",
+            user_id, user_name
         )
-    except Exception as e:
-        logger.warning(f"Ошибка обновления сообщения: {e}")
+        event = await conn.fetchrow("SELECT closed FROM events WHERE event_id=$1", event_id)
+        if not event:
+            await query.answer("Событие не найдено.", show_alert=True)
+            return
+
+        if btn == "Закрыть сбор":
+            if event["closed"]:
+                await query.answer("Сбор уже закрыт.", show_alert=True)
+                return
+            await conn.execute("UPDATE events SET closed=TRUE WHERE event_id=$1", event_id)
+        else:
+            if event["closed"]:
+                await query.answer("Сбор уже закрыт!", show_alert=True)
+                return
+
+            if btn in ["Я буду", "Я не иду", "Думаю"]:
+                # Удаляем все статусы пользователя для события
+                await conn.execute("DELETE FROM event_statuses WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+                await conn.execute("INSERT INTO event_statuses(event_id,user_id,status,plus_count) VALUES($1,$2,$3,$4)",
+                                   event_id, user_id, btn, 0)
+            elif btn == "Плюс":
+                row = await conn.fetchrow("SELECT plus_count FROM event_statuses WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+                if row:
+                    await conn.execute("UPDATE event_statuses SET plus_count = plus_count+1 WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+                else:
+                    await conn.execute("INSERT INTO event_statuses(event_id,user_id,status,plus_count) VALUES($1,$2,'Я буду',1)", event_id, user_id)
+            elif btn == "Минус":
+                row = await conn.fetchrow("SELECT plus_count FROM event_statuses WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+                if row and row["plus_count"] > 1:
+                    await conn.execute("UPDATE event_statuses SET plus_count = plus_count-1 WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+                elif row:
+                    await conn.execute("DELETE FROM event_statuses WHERE event_id=$1 AND user_id=$2", event_id, user_id)
+
+    new_text = await format_event(event_id)
+    reply_markup = None if btn == "Закрыть сбор" else get_keyboard(event_id)
+    try:
+        await query.edit_message_text(text=new_text, parse_mode="HTML", reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
 
 # -----------------------------
 # Скрытая команда /dump для администратора
@@ -206,24 +232,18 @@ async def dump(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(0, len(full_text), 3900):
         await update.message.reply_text(full_text[i:i+3900])
 
-# -----------------------------
-# Основной запуск
-# -----------------------------
-if __name__ == "__main__":
-    init_db()
-    delete_old_events()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+# --- Запуск ---
+def main():
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("newevent", new_event))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(CommandHandler("dump", dump))
+    app.add_handler(CommandHandler("new_event", new_event))
+    app.add_handler(CallbackQueryHandler(button_click))
 
-    PORT = int(os.environ.get("PORT", 8443))
-    URL = os.environ.get("APP_URL")
+    import asyncio
+    asyncio.run(init_db())
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{URL}/webhook/{BOT_TOKEN}"
-    )
+    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
+
+if __name__ == "__main__":
+    main()
