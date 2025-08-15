@@ -10,7 +10,11 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # =====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из переменной окружения Render
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Твой Telegram ID из переменной окружения Render
-DATA_FILE = "/data/events.json"   # Файл для сохранения событий
+DATA_DIR = "/data"
+DATA_FILE = os.path.join(DATA_DIR, "events.json")
+
+# Создаём папку, если её нет
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # =====================
 # ЛОГИ
