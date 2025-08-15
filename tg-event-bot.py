@@ -1,20 +1,20 @@
 import os
 import json
+import psycopg2
+from datetime import datetime, timedelta
+from psycopg2.extras import RealDictCursor
 import logging
 from uuid import uuid4
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
 
 # =====================
 # НАСТРОЙКИ
 # =====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из переменной окружения Render
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Твой Telegram ID из переменной окружения Render
-DATA_DIR = "/data"
-DATA_FILE = os.path.join(DATA_DIR, "events.json")
-
-# Создаём папку, если её нет
-os.makedirs(DATA_DIR, exist_ok=True)
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # =====================
 # ЛОГИ
@@ -26,29 +26,42 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # =====================
 events = {}
 
-def save_events():
-    """Сохраняем события в JSON"""
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(events, f, ensure_ascii=False)
-        logging.info("События сохранены в %s", DATA_FILE)
-    except Exception as e:
-        logging.error("Ошибка сохранения событий: %s", e)
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-def load_events():
-    """Загружаем события из JSON"""
-    global events
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                events = json.load(f)
-            logging.info("События загружены (%s)", len(events))
-        except Exception as e:
-            logging.error("Ошибка загрузки событий: %s", e)
-            events = {}
-    else:
-        logging.info("Файл с событиями отсутствует, начинаем с пустого списка.")
-        events = {}
+def init_db():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id SERIAL PRIMARY KEY,
+            event_id TEXT UNIQUE NOT NULL,
+            data JSONB NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """)
+        conn.commit()
+
+def save_event(event_id, data):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        INSERT INTO events (event_id, data, created_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
+        """, (event_id, psycopg2.extras.Json(data)))
+        conn.commit()
+
+def load_event(event_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT data FROM events WHERE event_id = %s", (event_id,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+def delete_old_events():
+    """Удаляем события старше 3 месяцев"""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM events WHERE created_at < %s", 
+                    (datetime.utcnow() - timedelta(days=90),))
+        conn.commit()
 
 # =====================
 # ЛОГИКА
