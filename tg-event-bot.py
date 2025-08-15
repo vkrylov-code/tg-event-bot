@@ -202,6 +202,17 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    event_id = query.message.message_id  # используем message_id как event_id
+    event = load_event(str(event_id))
+    if not event:
+        await query.edit_message_text("Ошибка: событие не найдено")
+        return
+
+    if event.get("closed"):
+        await query.answer("Сбор закрыт", show_alert=True)
+        return
+
 
     logger.info("Callback from %s data=%s", query.from_user.full_name, query.data)
 
@@ -282,13 +293,45 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("BadRequest while editing message: %s", e)
             raise
 
+# -----------------------------
+# Скрытая команда /dump для администратора
+# -----------------------------
+async def dump(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Доступ запрещен")
+        return
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT event_id, data, created_at FROM events ORDER BY created_at DESC")
+        rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("Событий нет")
+        return
+
+    text_lines = []
+    for row in rows:
+        eid = row["event_id"]
+        created = row["created_at"].strftime("%Y-%m-%d %H:%M")
+        data = row["data"]
+        text_lines.append(
+            f"ID: {eid} | Создано: {created}\n"
+            f"Текст: {data.get('text')}\n"
+            f"Пользователи: {data.get('users')}\n"
+            f"Closed: {data.get('closed')}\n{'-'*20}"
+        )
+
+    full_text = "\n".join(text_lines)
+    for i in range(0, len(full_text), 3900):
+        await update.message.reply_text(full_text[i:i+3900])
+
+
 # --- Запуск приложения (webhook) ---
 def main():
     
     init_db()
     delete_old_events()
-    load_event()
-    
+        
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
