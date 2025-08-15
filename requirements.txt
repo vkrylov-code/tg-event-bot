@@ -1,5 +1,4 @@
-# Библиотека для работы с Telegram Bot API
-python-telegram-bot[webhooks]==20.6
+python-telegram-bot[webhooks]
 
 # Асинхронная работа
 aiohttp==3.9.4

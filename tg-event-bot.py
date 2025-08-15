@@ -1,4 +1,3 @@
-# bot.py
 import os
 import html
 import logging
