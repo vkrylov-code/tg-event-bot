@@ -1,31 +1,24 @@
 import os
-import json
-import psycopg2
 from datetime import datetime, timedelta
-from psycopg2.extras import RealDictCursor
 import logging
-from uuid import uuid4
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
 
-
-# =====================
+# -----------------------------
 # НАСТРОЙКИ
-# =====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из переменной окружения Render
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))  # Твой Telegram ID из переменной окружения Render
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# -----------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен из Render
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # Ваш Telegram ID
+DATABASE_URL = os.environ["DATABASE_URL"]
 
-# =====================
-# ЛОГИ
-# =====================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# =====================
-# ХРАНИЛИЩЕ
-# =====================
-events = {}
-
+# -----------------------------
+# PostgreSQL
+# -----------------------------
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
@@ -47,7 +40,7 @@ def save_event(event_id, data):
         INSERT INTO events (event_id, data, created_at)
         VALUES (%s, %s, NOW())
         ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-        """, (event_id, psycopg2.extras.Json(data)))
+        """, (event_id, Json(data)))
         conn.commit()
 
 def load_event(event_id):
@@ -57,154 +50,161 @@ def load_event(event_id):
         return row["data"] if row else None
 
 def delete_old_events():
-    """Удаляем события старше 3 месяцев"""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM events WHERE created_at < %s", 
                     (datetime.utcnow() - timedelta(days=90),))
         conn.commit()
 
-# =====================
-# ЛОГИКА
-# =====================
-def get_keyboard(event_id):
-    """Создаёт клавиатуру"""
-    return InlineKeyboardMarkup([
+# -----------------------------
+# Логика бота
+# -----------------------------
+def build_keyboard(event):
+    keyboard = [
         [
-            InlineKeyboardButton("✅ Я буду", callback_data=f"yes|{event_id}"),
-            InlineKeyboardButton("❌ Я не иду", callback_data=f"no|{event_id}"),
-            InlineKeyboardButton("🤔 Думаю", callback_data=f"maybe|{event_id}")
+            InlineKeyboardButton("✅ Я буду", callback_data="going"),
+            InlineKeyboardButton("❌ Я не иду", callback_data="not_going"),
+            InlineKeyboardButton("🤔 Думаю", callback_data="thinking")
         ],
         [
-            InlineKeyboardButton("➕ Плюс", callback_data=f"plus|{event_id}"),
-            InlineKeyboardButton("➖ Минус", callback_data=f"minus|{event_id}"),
-            InlineKeyboardButton("🔒 Закрыть сбор", callback_data=f"close|{event_id}")
+            InlineKeyboardButton("➕ Плюс", callback_data="plus"),
+            InlineKeyboardButton("➖ Минус", callback_data="minus"),
+            InlineKeyboardButton("🛑 Закрыть сбор", callback_data="close")
         ]
-    ])
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-def format_event(event):
-    """Формирует красивое сообщение события"""
-    text = event["text"] + "\n\n"
-    text += "✅ Я буду:\n"
-    for user_id, user_data in event["yes"].items():
-        count = user_data.get("plus", 0)
-        plus_text = f" +{count}" if count > 0 else ""
-        text += f"[{user_data['name']}](tg://user?id={user_id}){plus_text}\n"
+def render_message(event):
+    """Создаёт текст события с итогами"""
+    lines = [event.get("text", "Событие")]
+    lines.append("\n-----------------")
+    going_list = []
+    not_going_list = []
+    thinking_list = []
 
-    text += "\n❌ Я не иду:\n"
-    for user_id, user_data in event["no"].items():
-        text += f"[{user_data['name']}](tg://user?id={user_id})\n"
+    for user, info in event.get("users", {}).items():
+        status = info["status"]
+        plus_count = info.get("plus", 0)
+        if status == "going":
+            name = f"{user} {'+'+str(plus_count) if plus_count else ''}"
+            going_list.append(name)
+        elif status == "not_going":
+            not_going_list.append(user)
+        elif status == "thinking":
+            thinking_list.append(user)
 
-    text += "\n🤔 Думаю:\n"
-    for user_id, user_data in event["maybe"].items():
-        text += f"[{user_data['name']}](tg://user?id={user_id})\n"
+    lines.append(f"Всего идут: {len(going_list)}")
+    lines.append(f"✅ {len(going_list)}: {', '.join(going_list) if going_list else '-'}")
+    lines.append(f"❌ {len(not_going_list)}: {', '.join(not_going_list) if not_going_list else '-'}")
+    lines.append(f"🤔 {len(thinking_list)}: {', '.join(thinking_list) if thinking_list else '-'}")
 
-    # Подсчёты
-    total_yes = len(event["yes"]) + sum(u["plus"] for u in event["yes"].values())
-    total_no = len(event["no"])
-    total_maybe = len(event["maybe"])
+    return "\n".join(lines)
 
-    text += "\n-----------------\n"
-    text += f"Всего идут: {total_yes}\n"
-    text += f"✅ {total_yes}\n"
-    text += f"❌ {total_no}\n"
-    text += f"🤔 {total_maybe}"
-
-    return text
-
+# -----------------------------
+# Обработчики команд
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправь /create чтобы создать событие.")
+    await update.message.reply_text("Привет! Используй /newevent <текст> для создания события.")
 
-async def create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    event_id = uuid4().hex
-    text = " ".join(context.args) if context.args else "Новое событие"
-    events[event_id] = {
+async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args) or "Новое событие"
+    event_id = str(update.message.message_id)  # уникальный id на основе message_id
+    event = {
         "text": text,
-        "yes": {},
-        "no": {},
-        "maybe": {},
-        "plus_no_name": 0
+        "users": {},
+        "closed": False
     }
-    save_events()
-    await update.message.reply_text(text, reply_markup=get_keyboard(event_id), parse_mode="Markdown")
+    save_event(event_id, event)
+    await update.message.reply_text(
+        render_message(event),
+        reply_markup=build_keyboard(event)
+    )
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    action, event_id = query.data.split("|")
-    event = events.get(event_id)
-
+    event_id = str(query.message.message_id)
+    event = load_event(event_id)
     if not event:
-        logging.warning("Event not found: %s", event_id)
-        await query.edit_message_text("Событие устарело или удалено.")
+        await query.edit_message_text("Ошибка: событие не найдено")
         return
 
-    user_id = str(query.from_user.id)
-    user_name = query.from_user.full_name
-
-    # Убираем пользователя из других статусов
-    if action in ["yes", "no", "maybe"]:
-        event["yes"].pop(user_id, None)
-        event["no"].pop(user_id, None)
-        event["maybe"].pop(user_id, None)
-
-    if action == "yes":
-        event["yes"][user_id] = {"name": user_name, "plus": event["yes"].get(user_id, {}).get("plus", 0)}
-    elif action == "no":
-        event["no"][user_id] = {"name": user_name}
-    elif action == "maybe":
-        event["maybe"][user_id] = {"name": user_name}
-    elif action == "plus":
-        if user_id in event["yes"]:
-            event["yes"][user_id]["plus"] = event["yes"][user_id].get("plus", 0) + 1
-        else:
-            event["plus_no_name"] += 1
-    elif action == "minus":
-        if user_id in event["yes"] and event["yes"][user_id].get("plus", 0) > 0:
-            event["yes"][user_id]["plus"] -= 1
-        elif event["plus_no_name"] > 0:
-            event["plus_no_name"] -= 1
-    elif action == "close":
-        await query.edit_message_text(format_event(event), parse_mode="Markdown")
-        events.pop(event_id, None)
-        save_events()
+    if event.get("closed"):
+        await query.answer("Сбор закрыт", show_alert=True)
         return
 
-    save_events()
-    await query.edit_message_text(format_event(event), reply_markup=get_keyboard(event_id), parse_mode="Markdown")
+    user = query.from_user.full_name
+    info = event.setdefault("users", {}).setdefault(user, {"status": None, "plus": 0})
 
-# =====================
-# АДМИН-КОМАНДА /dump
-# =====================
+    if query.data == "going":
+        info["status"] = "going"
+    elif query.data == "not_going":
+        info["status"] = "not_going"
+    elif query.data == "thinking":
+        info["status"] = "thinking"
+    elif query.data == "plus":
+        info["plus"] += 1
+        if info["status"] != "going":
+            info["status"] = "going"
+    elif query.data == "minus":
+        if info["plus"] > 0:
+            info["plus"] -= 1
+    elif query.data == "close":
+        event["closed"] = True
+
+    save_event(event_id, event)
+    try:
+        await query.edit_message_text(
+            render_message(event),
+            reply_markup=None if event.get("closed") else build_keyboard(event)
+        )
+    except Exception as e:
+        logger.warning(f"Ошибка обновления сообщения: {e}")
+
+# -----------------------------
+# Скрытая команда /dump для администратора
+# -----------------------------
 async def dump(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для этой команды.")
+        await update.message.reply_text("Доступ запрещен")
         return
 
-    if not os.path.exists(DATA_FILE):
-        await update.message.reply_text("Файл событий отсутствует.")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT event_id, data, created_at FROM events ORDER BY created_at DESC")
+        rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("Событий нет")
         return
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = f.read()
+    text_lines = []
+    for row in rows:
+        eid = row["event_id"]
+        created = row["created_at"].strftime("%Y-%m-%d %H:%M")
+        data = row["data"]
+        text_lines.append(f"ID: {eid} | Создано: {created}\nТекст: {data.get('text')}\nПользователи: {data.get('users')}\nClosed: {data.get('closed')}\n{'-'*20}")
 
-    if len(data) > 4000:
-        await update.message.reply_document(document=open(DATA_FILE, "rb"))
-    else:
-        await update.message.reply_text(f"```\n{data}\n```", parse_mode="Markdown")
+    full_text = "\n".join(text_lines)
+    for i in range(0, len(full_text), 3900):
+        await update.message.reply_text(full_text[i:i+3900])
 
-# =====================
-# ЗАПУСК
-# =====================
+# -----------------------------
+# Основной запуск
+# -----------------------------
 if __name__ == "__main__":
-    load_events()
+    init_db()
+    delete_old_events()
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("create", create))
+    app.add_handler(CommandHandler("newevent", new_event))
     app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(CommandHandler("dump", dump))
+    app.add_handler(CommandHandler("dump", dump))  # скрытая команда
 
-    logging.info("Бот запущен.")
-    app.run_polling()
+    PORT = int(os.environ.get("PORT", 8443))
+    URL = os.environ.get("APP_URL")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{URL}/webhook/{BOT_TOKEN}"
+    )
