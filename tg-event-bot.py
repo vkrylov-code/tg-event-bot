@@ -263,15 +263,15 @@ def main():
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
 
-    # Установка webhook
-    logger.info("Setting webhook to %s/webhook/%s", WEBHOOK_URL, TOKEN)
-    application.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}")
+    full_webhook_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
+    logger.info("Setting webhook to %s", full_webhook_url)
+    application.bot.set_webhook(full_webhook_url)
 
     # Запуск webhook
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_path=f"/webhook/{TOKEN}"
+        webhook_url=full_webhook_url
     )
 
 if __name__ == "__main__":
