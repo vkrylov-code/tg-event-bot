@@ -58,43 +58,35 @@ def format_event(event_id: str) -> str:
     user_names = event["user_names"]
 
     # ✅ Я буду
-    if lists["Я буду"]:
     lines = []
     for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
         name = user_names.get(uid, "User")
         link = format_user_link(uid, name)
         cnt = plus_counts.get(uid, 0)
         lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
-    parts.append("<b>✅ Я буду:</b>\n" + "\n".join(lines))
-else:
-    parts.append("<b>✅ Я буду:</b>\n—")
+    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
-# Анонимные плюсы (пользователи, которые нажали "Плюс", но не "Я буду")
-anon_lines = []
-for uid, cnt in sorted(plus_counts.items()):
-    if uid not in lists["Я буду"]:
-        anon_lines.append(f"— +{cnt}")
-if anon_lines:
-    parts.append("\n".join(anon_lines))
-
+    # Анонимные плюсы (только плюсы, не "Я буду")
+    anon_lines = []
+    for uid, cnt in sorted(plus_counts.items()):
+        if uid not in lists["Я буду"]:
+            anon_lines.append(f"— +{cnt}")
+    if anon_lines:
+        parts.append("\n".join(anon_lines))
 
     # ❌ Я не иду
-    if lists["Я не иду"]:
-        lines = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
-        parts.append("<b>❌ Я не иду:</b>\n" + "\n".join(lines) + "\n")
-    else:
-        parts.append("<b>❌ Я не иду:</b>\n—\n")
+    lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
+    parts.append("<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
 
     # 🤔 Думаю
-    if lists["Думаю"]:
-        lines = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x, ""))]
-        parts.append("<b>🤔 Думаю:</b>\n" + "\n".join(lines) + "\n")
-    else:
-        parts.append("<b>🤔 Думаю:</b>\n—\n")
+    lines_think = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x, ""))]
+    parts.append("<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
 
+    # Итоги
     total_yes_people = len(lists["Я буду"])
-    total_plus_count = sum(plus_counts.values())
-    total_go = total_yes_people + total_plus_count
+    total_plus_count = sum(plus_counts.get(uid, 0) for uid in lists["Я буду"])
+    total_anon_plus = sum(plus_counts.get(uid, 0) for uid in plus_counts if uid not in lists["Я буду"])
+    total_go = total_yes_people + total_plus_count + total_anon_plus
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
 
