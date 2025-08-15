@@ -22,9 +22,6 @@ if not TOKEN:
     logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
     raise SystemExit("BOT_TOKEN is required")
 
-if not WEBHOOK_URL:
-    logger.warning("WEBHOOK_URL не задан. Убедись, что переменная окружения установлена (Render).")
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     logger.error("Не задана переменная окружения DATABASE_URL. Прекращаю запуск.")
@@ -71,14 +68,6 @@ def format_event(event_id: str) -> str:
         parts.append("<b>✅ Я буду:</b>\n" + "\n".join(lines) + "\n")
     else:
         parts.append("<b>✅ Я буду:</b>\n—\n")
-
-    # Анонимные плюсы
-    anon_lines = []
-    for uid, cnt in sorted(plus_counts.items(), key=lambda x: user_names.get(x[0], "")):
-        if uid not in lists["Я буду"]:
-            anon_lines.append(f"— +{cnt}")
-    if anon_lines:
-        parts.append("\n".join(anon_lines) + "\n")
 
     # ❌ Я не иду
     if lists["Я не иду"]:
@@ -271,4 +260,20 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new_event", new_event))
-    app.add_handler(CommandHandler("
+    app.add_handler(CommandHandler("show_events", show_events))
+    app.add_handler(CallbackQueryHandler(button_click))
+
+    # Для вебхука (если используешь Render)
+    if WEBHOOK_URL:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+        )
+    else:
+        # Для polling
+        app.run_polling()
+
+if __name__ == "__main__":
+    main()
