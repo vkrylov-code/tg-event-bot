@@ -239,7 +239,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Увеличиваем счётчик
             event["plus_counts"][user_id] = event["plus_counts"].get(user_id, 0) + 1
             logger.info("Plus: %s now +%d (event %s)", user_name, event["plus_counts"][user_id], event_id)
-        lif btn == "Минус":
+        elif btn == "Минус":
     if user_id in event["plus_counts"]:
         event["plus_counts"][user_id] -= 1
         if event["plus_counts"][user_id] <= 0:
