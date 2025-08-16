@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import BadRequest
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
@@ -58,7 +59,6 @@ def format_event(event_id: str) -> str:
     plus_counts = event["plus_counts"]
     user_names = event["user_names"]
 
-    # ✅ Я буду
     lines = []
     for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
         name = user_names.get(uid, "User")
@@ -70,11 +70,9 @@ def format_event(event_id: str) -> str:
         lines.append(f"— +{anon_count}")
     parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
-    # ❌ Я не иду
     lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
     parts.append("\n<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
 
-    # 🤔 Думаю
     lines_think = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x, ""))]
     parts.append("\n<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
 
@@ -196,7 +194,7 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         format_event(event_id),
         parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)  # show_delete=False по умолчанию
+        reply_markup=get_keyboard(event_id)
     )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,36 +208,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     event = events[event_id]
+    changed = False
 
     if action in ["Я буду", "Я не иду", "Думаю"]:
-        # Убираем пользователя из всех списков
-        for lst in event["lists"].values():
-            lst.discard(user.id)
-        event["lists"][action].add(user.id)
-        event["user_names"][user.id] = user.full_name
-
-        # Сброс плюсов, если пользователь ушел из "Я буду"
-        if action != "Я буду" and user.id in event["plus_counts"]:
-            del event["plus_counts"][user.id]
+        if user.id not in event["lists"][action]:
+            for lst in event["lists"].values():
+                lst.discard(user.id)
+            event["lists"][action].add(user.id)
+            event["user_names"][user.id] = user.full_name
+            if action != "Я буду" and user.id in event["plus_counts"]:
+                del event["plus_counts"][user.id]
+            changed = True
 
     elif action == "Плюс":
         if user.id in event["lists"]["Я буду"]:
             event["plus_counts"][user.id] = event["plus_counts"].get(user.id, 0) + 1
         else:
-            # Анонимный плюс
             event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
+        changed = True
 
     elif action == "Минус":
         if user.id in event["lists"]["Я буду"]:
-            event["plus_counts"][user.id] = max(event["plus_counts"].get(user.id, 0) - 1, 0)
+            if event["plus_counts"].get(user.id, 0) > 0:
+                event["plus_counts"][user.id] -= 1
+                changed = True
         else:
-            # Анонимный минус
             if event["plus_counts"].get("anon", 0) > 0:
                 event["plus_counts"]["anon"] -= 1
+                changed = True
 
     elif action == "Закрыть сбор":
-        if user.id == ADMIN_ID:
+        if user.id == ADMIN_ID and not event["closed"]:
             event["closed"] = True
+            changed = True
 
     elif action == "Удалить":
         if user.id == ADMIN_ID:
@@ -247,13 +248,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Событие удалено администратором.")
             return
 
-    save_event(event_id, event)
-
-    await query.edit_message_text(
-        format_event(event_id),
-        parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)  # show_delete=False при обычном редактировании
-    )
+    if changed:
+        save_event(event_id, event)
+        try:
+            await query.edit_message_text(
+                format_event(event_id),
+                parse_mode="HTML",
+                reply_markup=get_keyboard(event_id)
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                pass
+            else:
+                raise
 
 async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -282,14 +289,13 @@ async def clean_events_command(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- Main ---
 def main():
     load_events()
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("new_event", new_event))
-    application.add_handler(CommandHandler("clean_events", clean_events_command))
-    application.add_handler(CommandHandler("list_events", list_events))
-    application.add_handler(CallbackQueryHandler(callback_handler))
-
-    application.run_polling()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("new_event", new_event))
+    app.add_handler(CommandHandler("list_events", list_events))
+    app.add_handler(CommandHandler("clean_events", clean_events_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
