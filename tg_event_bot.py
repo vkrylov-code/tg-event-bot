@@ -25,8 +25,8 @@ if not TOKEN or not DATABASE_URL:
 events = {}
 
 # --- Клавиатуры ---
-def get_keyboard(event_id):
-    return InlineKeyboardMarkup([
+def get_keyboard(event_id, show_delete=False):
+    buttons = [
         [
             InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
             InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
@@ -36,11 +36,15 @@ def get_keyboard(event_id):
             InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
             InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
             InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор"),
-        ],
-        [
-            InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")
         ]
-    ])
+    ]
+
+    if show_delete:
+        buttons.append([
+            InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")
+        ])
+
+    return InlineKeyboardMarkup(buttons)
 
 def format_user_link(user_id: int, name: str) -> str:
     safe = html.escape(name)
@@ -68,11 +72,11 @@ def format_event(event_id: str) -> str:
 
     # ❌ Я не иду
     lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
-    parts.append("<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
+    parts.append("\n<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
 
     # 🤔 Думаю
     lines_think = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x, ""))]
-    parts.append("<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
+    parts.append("\n<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
 
     total_yes_people = len(lists["Я буду"])
     total_plus_count = sum(plus_counts.get(uid, 0) for uid in lists["Я буду"])
@@ -81,8 +85,7 @@ def format_event(event_id: str) -> str:
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
 
-    parts.append("-----------------")
-    parts.append(f"ID события: {event_id}")
+    parts.append("\n-----------------")
     parts.append(f"Всего идут: {total_go}")
     parts.append(f"✅ {total_go}")
     parts.append(f"❌ {total_no}")
@@ -193,7 +196,7 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         format_event(event_id),
         parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
+        reply_markup=get_keyboard(event_id)  # show_delete=False по умолчанию
     )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,7 +252,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         format_event(event_id),
         parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
+        reply_markup=get_keyboard(event_id)  # show_delete=False при обычном редактировании
     )
 
 async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -262,9 +265,7 @@ async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for event_id, event in events.items():
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")]
-        ])
+        keyboard = get_keyboard(event_id, show_delete=True)
         await update.message.reply_text(
             format_event(event_id),
             parse_mode="HTML",
