@@ -1,7 +1,7 @@
 import threading
 import http.server
 import socketserver
-from tg-event-bot import main
+from tg_event_bot import main  # <-- импорт из нового файла
 
 PORT = 10000  # Render Free видит открытый порт
 
