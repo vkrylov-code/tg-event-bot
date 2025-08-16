@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]
+python-telegram-bot==20
 
 # Асинхронная работа
 aiohttp==3.9.4
