@@ -1,7 +1,5 @@
 python-telegram-bot==20
 
-python-telegram-bot[job_queue]
-
 # Асинхронная работа
 aiohttp==3.9.4
 
