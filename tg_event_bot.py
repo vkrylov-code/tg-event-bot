@@ -61,11 +61,10 @@ def format_event(event_id: str) -> str:
         link = format_user_link(uid, name)
         cnt = plus_counts.get(uid, 0)
         lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
-    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
-
     anon_count = plus_counts.get("anon", 0)
     if anon_count > 0:
-        parts.append(f"— +{anon_count}")
+        lines.append(f"— +{anon_count}")
+    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
     # ❌ Я не иду
     lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
@@ -208,21 +207,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     event = events[event_id]
+
     if action in ["Я буду", "Я не иду", "Думаю"]:
         # Убираем пользователя из всех списков
         for lst in event["lists"].values():
             lst.discard(user.id)
         event["lists"][action].add(user.id)
         event["user_names"][user.id] = user.full_name
+
+        # Сброс плюсов, если пользователь ушел из "Я буду"
+        if action != "Я буду" and user.id in event["plus_counts"]:
+            del event["plus_counts"][user.id]
+
     elif action == "Плюс":
-        event["plus_counts"][user.id] = event["plus_counts"].get(user.id, 0) + 1
-        event["lists"]["Я буду"].add(user.id)
-        event["user_names"][user.id] = user.full_name
+        if user.id in event["lists"]["Я буду"]:
+            event["plus_counts"][user.id] = event["plus_counts"].get(user.id, 0) + 1
+        else:
+            # Анонимный плюс
+            event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
+
     elif action == "Минус":
-        event["plus_counts"][user.id] = max(event["plus_counts"].get(user.id, 0) - 1, 0)
+        if user.id in event["lists"]["Я буду"]:
+            event["plus_counts"][user.id] = max(event["plus_counts"].get(user.id, 0) - 1, 0)
+        else:
+            # Анонимный минус
+            if event["plus_counts"].get("anon", 0) > 0:
+                event["plus_counts"]["anon"] -= 1
+
     elif action == "Закрыть сбор":
         if user.id == ADMIN_ID:
             event["closed"] = True
+
     elif action == "Удалить":
         if user.id == ADMIN_ID:
             delete_event(event_id)
@@ -230,6 +245,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     save_event(event_id, event)
+
     await query.edit_message_text(
         format_event(event_id),
         parse_mode="HTML",
