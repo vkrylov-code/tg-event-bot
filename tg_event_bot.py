@@ -236,6 +236,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(event_id)
     )
 
+async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Доступ запрещён.")
+        return
+
+    if not events:
+        await update.message.reply_text("Событий пока нет.")
+        return
+
+    for event_id, event in events.items():
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")]
+        ])
+        await update.message.reply_text(
+            format_event(event_id),
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
 async def clean_events_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Доступ запрещён.")
@@ -250,6 +269,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("new_event", new_event))
     application.add_handler(CommandHandler("clean_events", clean_events_command))
+    application.add_handler(CommandHandler("list_events", list_events))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     application.run_polling()
