@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # --- Конфиг из окружения ---
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 if not TOKEN:
     logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
@@ -145,18 +145,16 @@ def load_events():
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Привет! Создай событие командой:\n"
         "/new_event Текст события\n\n"
-        "В тексте можно использовать переносы строк. Пример:\n"
-        "/new_event Первая строка\\nВторая строка"
+        "Пример:\n"
+        "/new_event Встреча завтра в 19:00"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text or ""
-    text = raw
-    if raw.startswith("/new_event"):
-        text = raw[len("/new_event"):].strip()
+    raw = update.effective_message.text or ""
+    text = raw[len("/new_event"):].strip() if raw.startswith("/new_event") else raw
     if not text:
         text = "Событие (без названия)"
 
@@ -168,11 +166,9 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_names": {},
         "closed": False
     }
-    
     save_event(event_id, events[event_id])
-    logger.info("Создано событие id=%s by %s: %s", event_id, update.effective_user.full_name, text)
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         format_event(event_id),
         parse_mode="HTML",
         reply_markup=get_keyboard(event_id)
@@ -180,16 +176,16 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
+        await update.effective_message.reply_text("Доступ запрещён.")
         return
     load_events()
     if not events:
-        await update.message.reply_text("Событий нет.")
+        await update.effective_message.reply_text("Событий нет.")
         return
     msg = ""
     for eid, ev in events.items():
         msg += f"{eid}: {html.escape(ev['text'])}\n"
-    await update.message.reply_text(msg)
+    await update.effective_message.reply_text(msg)
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -266,8 +262,7 @@ def main():
     application.add_handler(CommandHandler("new_event", new_event))
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
-
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
