@@ -1,15 +1,7 @@
 services:
   - type: worker
-    name: tg-event-bot
+    name: telegram-bot
     env: python
     plan: free
-    region: frankfurt   # или oregon, зависит от того, где ближе
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "tg-event-bot.py"
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: ADMIN_ID
-        sync: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: python tg-event-bot.py
