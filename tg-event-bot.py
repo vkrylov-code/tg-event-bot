@@ -12,21 +12,12 @@ from psycopg2.extras import RealDictCursor, Json
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Конфиг из окружения ---
+# --- Конфиг ---
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-
-if not TOKEN:
-    logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
-    raise SystemExit("BOT_TOKEN is required")
-
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    logger.error("Не задана переменная окружения DATABASE_URL. Прекращаю запуск.")
-    raise SystemExit("DATABASE_URL is required")
 
-# --- Хранилище событий в памяти ---
-events = {}
+events = {}  # Хранилище событий
 
 # --- Клавиатура ---
 def get_keyboard(event_id):
@@ -98,29 +89,21 @@ def format_event(event_id: str) -> str:
 
 # --- База данных ---
 def save_event(event_id, event):
-    event_copy = {
-        **event,
-        "lists": {k: list(v) for k, v in event["lists"].items()}
-    }
+    event_copy = {**event, "lists": {k: list(v) for k, v in event["lists"].items()}}
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
                 data JSONB
             )
-            """
-        )
-        cur.execute(
-            """
+        """)
+        cur.execute("""
             INSERT INTO events (event_id, data)
             VALUES (%s, %s)
             ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-            """,
-            (event_id, Json(event_copy))
-        )
+        """, (event_id, Json(event_copy)))
         conn.commit()
         cur.close()
         conn.close()
@@ -145,19 +128,16 @@ def load_events():
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
+    await update.message.reply_text(
         "Привет! Создай событие командой:\n"
-        "/new_event Текст события\n\n"
-        "Пример:\n"
-        "/new_event Встреча завтра в 19:00"
+        "/new_event Текст события"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = update.effective_message.text or ""
+    raw = update.message.text or ""
     text = raw[len("/new_event"):].strip() if raw.startswith("/new_event") else raw
     if not text:
         text = "Событие (без названия)"
-
     event_id = uuid4().hex
     events[event_id] = {
         "text": text,
@@ -167,57 +147,40 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "closed": False
     }
     save_event(event_id, events[event_id])
-
-    await update.effective_message.reply_text(
-        format_event(event_id),
-        parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
-    )
+    await update.message.reply_text(format_event(event_id), parse_mode="HTML", reply_markup=get_keyboard(event_id))
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.effective_message.reply_text("Доступ запрещён.")
+        await update.message.reply_text("Доступ запрещён.")
         return
     load_events()
     if not events:
-        await update.effective_message.reply_text("Событий нет.")
+        await update.message.reply_text("Событий нет.")
         return
     msg = ""
     for eid, ev in events.items():
         msg += f"{eid}: {html.escape(ev['text'])}\n"
-    await update.effective_message.reply_text(msg)
+    await update.message.reply_text(msg)
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     try:
         event_id, btn = query.data.split("|", 1)
     except ValueError:
-        logger.warning("Bad callback_data: %s", query.data)
         return
-
     event = events.get(event_id)
     if not event:
         await query.answer("Событие не найдено.", show_alert=True)
         return
-
     user_id = query.from_user.id
     user_name = query.from_user.full_name
     event["user_names"][user_id] = user_name
     old_text = format_event(event_id)
-    old_markup_present = bool(query.message.reply_markup and getattr(query.message.reply_markup, "inline_keyboard", None))
 
     if btn == "Закрыть сбор":
-        if event["closed"]:
-            await query.answer("Сбор уже закрыт.", show_alert=True)
-            return
         event["closed"] = True
-    else:
-        if event["closed"]:
-            await query.answer("Сбор уже закрыт!", show_alert=True)
-            return
-
+    elif not event["closed"]:
         if btn in ["Я буду", "Я не иду", "Думаю"]:
             for k in ["Я буду", "Я не иду", "Думаю"]:
                 if k != btn:
@@ -231,30 +194,23 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
         elif btn == "Минус":
-            if user_id in event["lists"]["Я буду"]:
-                if user_id in event["plus_counts"]:
-                    event["plus_counts"][user_id] -= 1
-                    if event["plus_counts"][user_id] <= 0:
-                        event["plus_counts"].pop(user_id)
-            else:
-                if "anon" in event["plus_counts"]:
-                    event["plus_counts"]["anon"] -= 1
-                    if event["plus_counts"]["anon"] <= 0:
-                        event["plus_counts"].pop("anon")
-
+            if user_id in event["lists"]["Я буду"] and user_id in event["plus_counts"]:
+                event["plus_counts"][user_id] -= 1
+                if event["plus_counts"][user_id] <= 0:
+                    event["plus_counts"].pop(user_id)
+            elif "anon" in event["plus_counts"]:
+                event["plus_counts"]["anon"] -= 1
+                if event["plus_counts"]["anon"] <= 0:
+                    event["plus_counts"].pop("anon")
     save_event(event_id, event)
     new_text = format_event(event_id)
-    need_edit = new_text != old_text or (old_markup_present and event["closed"])
-    reply_markup = None if event["closed"] else get_keyboard(event_id)
-    if need_edit:
+    if new_text != old_text or event["closed"]:
         try:
-            await query.edit_message_text(text=new_text, parse_mode="HTML", reply_markup=reply_markup)
-        except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                logger.exception("BadRequest: %s", e)
-                raise
+            await query.edit_message_text(text=new_text, parse_mode="HTML",
+                                          reply_markup=None if event["closed"] else get_keyboard(event_id))
+        except BadRequest:
+            pass
 
-# --- Запуск приложения ---
 def main():
     load_events()
     application = Application.builder().token(TOKEN).build()
@@ -263,6 +219,3 @@ def main():
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
     application.run_polling()
-
-if __name__ == "__main__":
-    main()
