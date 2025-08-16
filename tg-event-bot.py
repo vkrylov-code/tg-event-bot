@@ -14,17 +14,15 @@ logger = logging.getLogger(__name__)
 
 # --- Конфиг из окружения ---
 TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # публичный URL вашего сервера
-PORT = int(os.environ.get("PORT", 8443))
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
-if not TOKEN or not WEBHOOK_URL:
-    logger.error("Не заданы BOT_TOKEN или WEBHOOK_URL")
-    raise SystemExit("BOT_TOKEN и WEBHOOK_URL обязательны")
+if not TOKEN:
+    logger.error("Не задана переменная окружения BOT_TOKEN. Прекращаю запуск.")
+    raise SystemExit("BOT_TOKEN is required")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
-    logger.error("Не задана переменная окружения DATABASE_URL")
+    logger.error("Не задана переменная окружения DATABASE_URL. Прекращаю запуск.")
     raise SystemExit("DATABASE_URL is required")
 
 # --- Хранилище событий в памяти ---
@@ -100,21 +98,29 @@ def format_event(event_id: str) -> str:
 
 # --- База данных ---
 def save_event(event_id, event):
-    event_copy = {**event, "lists": {k: list(v) for k, v in event["lists"].items()}}
+    event_copy = {
+        **event,
+        "lists": {k: list(v) for k, v in event["lists"].items()}
+    }
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
                 data JSONB
             )
-        """)
-        cur.execute("""
+            """
+        )
+        cur.execute(
+            """
             INSERT INTO events (event_id, data)
             VALUES (%s, %s)
             ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-        """, (event_id, Json(event_copy)))
+            """,
+            (event_id, Json(event_copy))
+        )
         conn.commit()
         cur.close()
         conn.close()
@@ -148,9 +154,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text or ""
-    text = raw[len("/new_event"):].strip() if raw.startswith("/new_event") else raw
+    text = raw
+    if raw.startswith("/new_event"):
+        text = raw[len("/new_event"):].strip()
     if not text:
         text = "Событие (без названия)"
+
     event_id = uuid4().hex
     events[event_id] = {
         "text": text,
@@ -159,8 +168,10 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_names": {},
         "closed": False
     }
+    
     save_event(event_id, events[event_id])
     logger.info("Создано событие id=%s by %s: %s", event_id, update.effective_user.full_name, text)
+
     await update.message.reply_text(
         format_event(event_id),
         parse_mode="HTML",
@@ -183,11 +194,13 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     try:
         event_id, btn = query.data.split("|", 1)
     except ValueError:
         logger.warning("Bad callback_data: %s", query.data)
         return
+
     event = events.get(event_id)
     if not event:
         await query.answer("Событие не найдено.", show_alert=True)
@@ -254,12 +267,7 @@ def main():
     application.add_handler(CommandHandler("events", show_events))
     application.add_handler(CallbackQueryHandler(button_click))
 
-    # Настройка webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/webhook/{TOKEN}"
-    )
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
