@@ -166,10 +166,14 @@ def clean_old_events(days=30):
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Создай событие командой:\n"
-        "/new_event Текст события\n\n"
-        "В тексте можно использовать переносы строк. Пример:\n"
-        "/new_event Первая строка\\nВторая строка"
+        "👋 Привет!\n\n"
+        "Я помогу организовать встречу или событие прямо в Telegram.\n\n"
+        "Что я умею:\n"
+        "✅ Создавать события (/new_event)\n"
+        "👥 Отмечать, кто идёт, кто нет, а кто ещё думает\n"
+        "➕ Учитывать гостей и +1\n\n"
+        "👉 Попробуй создать событие:\n"
+        "/new_event Встреча в субботу 🎉"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,9 +242,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 changed = True
 
     elif action == "Закрыть сбор":
-        if user.id == ADMIN_ID and not event["closed"]:
-            event["closed"] = True
-            changed = True
+        event["closed"] = True
+        changed = True
 
     elif action == "Удалить":
         if user.id == ADMIN_ID:
