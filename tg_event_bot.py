@@ -27,6 +27,18 @@ events = {}
 
 # --- Клавиатуры ---
 def get_keyboard(event_id, show_delete=False):
+    event = events.get(event_id)
+    if not event:
+        return None
+
+    # Если событие закрыто — убираем кнопки голосования
+    if event.get("closed"):
+        buttons = []
+        if show_delete:
+            buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
+        return InlineKeyboardMarkup(buttons) if buttons else None
+
+    # Стандартные кнопки
     buttons = [
         [
             InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
@@ -41,9 +53,7 @@ def get_keyboard(event_id, show_delete=False):
     ]
 
     if show_delete:
-        buttons.append([
-            InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")
-        ])
+        buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
 
     return InlineKeyboardMarkup(buttons)
 
