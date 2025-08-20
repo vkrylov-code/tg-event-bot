@@ -175,6 +175,10 @@ def clean_old_events(days=30):
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    logger.info(f"/start от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+    
     await update.message.reply_text(
         "👋 Привет!\n\n"
         "Я помогу организовать встречу или событие прямо в Telegram.\n\n"
@@ -184,9 +188,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "➕ Учитывать гостей и +1\n\n"
         "👉 Попробуй создать событие:\n"
         "/new_event Встреча в субботу 🎉"
+        "\n\nСрок жизни события 30 дней или до закрытия сбора."
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    logger.info(f"/new_event от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+
     raw = update.message.text or ""
     text = raw
     if raw.startswith("/new_event"):
@@ -212,8 +221,14 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
     query = update.callback_query
+    chat = update.effective_chat
+    user = update.effective_user
+    logger.info(f"Callback '{query.data}' от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+
     await query.answer()
+    
     event_id, action = query.data.split("|", 1)
     user = query.from_user
 
@@ -276,6 +291,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise
 
 async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    chat = update.effective_chat
+    user = update.effective_user
+    logger.info(f"/list_events от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Доступ запрещён.")
         return
