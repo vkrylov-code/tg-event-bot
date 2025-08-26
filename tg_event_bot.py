@@ -145,6 +145,9 @@ def load_events():
             event_id = row["event_id"]
             data = row["data"]
             data["lists"] = {k: set(v) for k, v in data["lists"].items()}
+            # 👇 добавляем нормализацию ключей user_names
+            if "user_names" in data:
+                data["user_names"] = {int(uid): name for uid, name in data["user_names"].items()}
             events[event_id] = data
         cur.close()
         conn.close()
