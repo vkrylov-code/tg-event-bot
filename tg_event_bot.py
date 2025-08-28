@@ -102,6 +102,7 @@ def save_event(event_id, event):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
+        # создаём таблицу если нет
         cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
@@ -123,6 +124,13 @@ def load_events():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        # создаём таблицу если нет
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                data JSONB
+            )
+        """)
         cur.execute("SELECT * FROM events")
         for row in cur.fetchall():
             data = row["data"]
