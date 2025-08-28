@@ -3,18 +3,17 @@ import html
 import logging
 from uuid import uuid4
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import BadRequest
+
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-# --- Логи ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
-
-# --- Конфиг ---
+# --- Загружаем .env ---
+load_dotenv()
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -22,7 +21,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not TOKEN or not DATABASE_URL:
     raise SystemExit("BOT_TOKEN and DATABASE_URL required")
 
-# --- События ---
+# --- Логирование ---
+logging.basicConfig(filename="bot.log", level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Хранилище событий ---
 events = {}
 
 # --- Клавиатуры ---
@@ -31,14 +35,12 @@ def get_keyboard(event_id, show_delete=False):
     if not event:
         return None
 
-    # Если событие закрыто — убираем кнопки голосования
     if event.get("closed"):
         buttons = []
         if show_delete:
             buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
         return InlineKeyboardMarkup(buttons) if buttons else None
 
-    # Стандартные кнопки
     buttons = [
         [
             InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
@@ -51,10 +53,8 @@ def get_keyboard(event_id, show_delete=False):
             InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор"),
         ]
     ]
-
     if show_delete:
         buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
-
     return InlineKeyboardMarkup(buttons)
 
 def format_user_link(user_id: int, name: str) -> str:
@@ -69,66 +69,50 @@ def format_event(event_id: str) -> str:
     plus_counts = event["plus_counts"]
     user_names = event["user_names"]
 
-    lines = []
-    for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x, "")):
-        name = user_names.get(uid, "User")
-        link = format_user_link(uid, name)
-        cnt = plus_counts.get(uid, 0)
-        lines.append(link + (f" +{cnt}" if cnt > 0 else ""))
-    anon_count = plus_counts.get("anon", 0)
-    if anon_count > 0:
+    lines = [format_user_link(uid, user_names.get(uid, "User")) +
+             (f" +{plus_counts.get(uid,0)}" if plus_counts.get(uid,0)>0 else "")
+             for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x,""))]
+    anon_count = plus_counts.get("anon",0)
+    if anon_count>0:
         lines.append(f"— +{anon_count}")
     parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
 
-    lines_no = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x, ""))]
+    lines_no = [format_user_link(uid, user_names.get(uid,"User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x,""))]
     parts.append("\n<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
 
-    lines_think = [format_user_link(uid, user_names.get(uid, "User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x, ""))]
+    lines_think = [format_user_link(uid, user_names.get(uid,"User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x,""))]
     parts.append("\n<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
 
-    total_yes_people = len(lists["Я буду"])
-    total_plus_count = sum(plus_counts.get(uid, 0) for uid in lists["Я буду"])
-    total_anon_plus = plus_counts.get("anon", 0)
-    total_go = total_yes_people + total_plus_count + total_anon_plus
+    total_yes = len(lists["Я буду"]) + sum(plus_counts.get(uid,0) for uid in lists["Я буду"]) + plus_counts.get("anon",0)
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
-
     parts.append("\n-----------------")
-    parts.append(f"Всего идут: {total_go}")
-    parts.append(f"✅ {total_go}")
+    parts.append(f"Всего идут: {total_yes}")
+    parts.append(f"✅ {total_yes}")
     parts.append(f"❌ {total_no}")
     parts.append(f"🤔 {total_think}")
 
-    if event["closed"]:
+    if event.get("closed"):
         parts.append("\n⚠️ Сбор закрыт.")
-
     return "\n".join(parts)
 
-# --- БД ---
+# --- Работа с БД ---
 def save_event(event_id, event):
-    event_copy = {
-        **event,
-        "lists": {k: list(v) for k, v in event["lists"].items()}
-    }
+    event_copy = {**event, "lists": {k: list(v) for k,v in event["lists"].items()}}
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
                 data JSONB
             )
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO events (event_id, data)
-            VALUES (%s, %s)
-            ON CONFLICT (event_id) DO UPDATE SET data = EXCLUDED.data
-            """,
-            (event_id, Json(event_copy))
-        )
+        """)
+        cur.execute("""
+            INSERT INTO events(event_id,data)
+            VALUES(%s,%s)
+            ON CONFLICT(event_id) DO UPDATE SET data=EXCLUDED.data
+        """,(event_id,Json(event_copy)))
         conn.commit()
         cur.close()
         conn.close()
@@ -140,187 +124,108 @@ def load_events():
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM events")
-        rows = cur.fetchall()
-        for row in rows:
-            event_id = row["event_id"]
+        for row in cur.fetchall():
             data = row["data"]
-            data["lists"] = {k: set(v) for k, v in data["lists"].items()}
-            # 👇 добавляем нормализацию ключей user_names
-            if "user_names" in data:
-                data["user_names"] = {int(uid): name for uid, name in data["user_names"].items()}
-            events[event_id] = data
+            data["lists"] = {k:set(v) for k,v in data["lists"].items()}
+            events[row["event_id"]] = data
         cur.close()
         conn.close()
     except Exception as e:
         logger.exception("Ошибка загрузки событий: %s", e)
 
 def delete_event(event_id):
-    events.pop(event_id, None)
+    events.pop(event_id,None)
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        cur.execute("DELETE FROM events WHERE event_id=%s", (event_id,))
+        cur.execute("DELETE FROM events WHERE event_id=%s",(event_id,))
         conn.commit()
         cur.close()
         conn.close()
     except Exception as e:
-        logger.exception("Ошибка удаления события %s: %s", event_id, e)
-
-def clean_old_events(days=30):
-    now = datetime.utcnow()
-    to_delete = []
-    for event_id, event in events.items():
-        created = datetime.fromisoformat(event.get("created_at"))
-        if event.get("closed") or (now - created) > timedelta(days=days):
-            to_delete.append(event_id)
-    for eid in to_delete:
-        delete_event(eid)
+        logger.exception("Ошибка удаления события %s: %s", event_id,e)
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     logger.info(f"/start от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
-    
     await update.message.reply_text(
-        "👋 Привет!\n\n"
-        "Я помогу организовать встречу или событие прямо в Telegram.\n\n"
-        "Что я умею:\n"
-        "✅ Создавать события (/new_event)\n"
-        "👥 Отмечать, кто идёт, кто нет, а кто ещё думает\n"
-        "➕ Учитывать гостей и +1\n\n"
-        "👉 Попробуй создать событие:\n"
-        "/new_event Встреча в субботу 🎉"
-        "\n\nСрок жизни события 30 дней или до закрытия сбора."
+        "👋 Привет!\nЯ помогу организовать встречу или событие.\n"
+        "Создать событие: /new_event Текст события"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     logger.info(f"/new_event от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
-
-    raw = update.message.text or ""
-    text = raw
-    if raw.startswith("/new_event"):
-        text = raw[len("/new_event"):].strip()
-    if not text:
-        text = "Событие (без названия)"
-
+    text = " ".join(context.args) or "Событие (без названия)"
     event_id = uuid4().hex
     events[event_id] = {
         "text": text,
-        "lists": {"Я буду": set(), "Я не иду": set(), "Думаю": set()},
-        "plus_counts": {},
-        "user_names": {},
-        "closed": False,
-        "created_at": datetime.utcnow().isoformat()
+        "lists":{"Я буду":set(),"Я не иду":set(),"Думаю":set()},
+        "plus_counts":{},
+        "user_names":{},
+        "closed":False,
+        "created_at":datetime.utcnow().isoformat()
     }
-    
     save_event(event_id, events[event_id])
-    await update.message.reply_text(
-        format_event(event_id),
-        parse_mode="HTML",
-        reply_markup=get_keyboard(event_id)
-    )
+    await update.message.reply_text(format_event(event_id), parse_mode="HTML",
+                                    reply_markup=get_keyboard(event_id))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
     query = update.callback_query
-    chat = update.effective_chat
-    user = update.effective_user
-    logger.info(f"Callback '{query.data}' от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
-
     await query.answer()
-    
-    event_id, action = query.data.split("|", 1)
+    event_id, action = query.data.split("|",1)
     user = query.from_user
 
     if event_id not in events:
         await query.edit_message_text("Событие больше недоступно.")
         return
-
     event = events[event_id]
-    changed = False
+    changed=False
 
-    if action in ["Я буду", "Я не иду", "Думаю"]:
-        if user.id not in event["lists"][action]:
-            for lst in event["lists"].values():
-                lst.discard(user.id)
-            event["lists"][action].add(user.id)
-            event["user_names"][user.id] = user.full_name
-            if action != "Я буду" and user.id in event["plus_counts"]:
-                del event["plus_counts"][user.id]
-            changed = True
+    if action in ["Я буду","Я не иду","Думаю"]:
+        for lst in event["lists"].values():
+            lst.discard(user.id)
+        event["lists"][action].add(user.id)
+        event["user_names"][user.id] = user.full_name
+        if action!="Я буду" and user.id in event["plus_counts"]:
+            del event["plus_counts"][user.id]
+        changed=True
 
-    elif action == "Плюс":
+    elif action=="Плюс":
         if user.id in event["lists"]["Я буду"]:
-            event["plus_counts"][user.id] = event["plus_counts"].get(user.id, 0) + 1
+            event["plus_counts"][user.id] = event["plus_counts"].get(user.id,0)+1
         else:
-            event["plus_counts"]["anon"] = event["plus_counts"].get("anon", 0) + 1
-        changed = True
-
-    elif action == "Минус":
-        if user.id in event["lists"]["Я буду"]:
-            if event["plus_counts"].get(user.id, 0) > 0:
-                event["plus_counts"][user.id] -= 1
-                changed = True
-        else:
-            if event["plus_counts"].get("anon", 0) > 0:
-                event["plus_counts"]["anon"] -= 1
-                changed = True
-
-    elif action == "Закрыть сбор":
-        event["closed"] = True
-        changed = True
-
-    elif action == "Удалить":
-        if user.id == ADMIN_ID:
-            delete_event(event_id)
-            await query.edit_message_text("Событие удалено администратором.")
-            return
+            event["plus_counts"]["anon"] = event["plus_counts"].get("anon",0)+1
+        changed=True
+    elif action=="Минус":
+        if user.id in event["lists"]["Я буду"] and event["plus_counts"].get(user.id,0)>0:
+            event["plus_counts"][user.id]-=1
+            changed=True
+        elif event["plus_counts"].get("anon",0)>0:
+            event["plus_counts"]["anon"]-=1
+            changed=True
+    elif action=="Закрыть сбор":
+        event["closed"]=True
+        changed=True
+    elif action=="Удалить" and user.id==ADMIN_ID:
+        delete_event(event_id)
+        await query.edit_message_text("Событие удалено администратором.")
+        return
 
     if changed:
-        save_event(event_id, event)
+        save_event(event_id,event)
         try:
-            await query.edit_message_text(
-                format_event(event_id),
-                parse_mode="HTML",
-                reply_markup=get_keyboard(event_id)
-            )
+            await query.edit_message_text(format_event(event_id),
+                                          parse_mode="HTML",
+                                          reply_markup=get_keyboard(event_id))
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 pass
             else:
                 raise
-
-async def list_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat = update.effective_chat
-    user = update.effective_user
-    logger.info(f"/list_events от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
-
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
-        return
-
-    if not events:
-        await update.message.reply_text("Событий пока нет.")
-        return
-
-    for event_id, event in events.items():
-        keyboard = get_keyboard(event_id, show_delete=True)
-        await update.message.reply_text(
-            format_event(event_id),
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
-
-async def clean_events_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    clean_old_events()
-    await update.message.reply_text("Старые и закрытые события удалены.")
 
 # --- Main ---
 def main():
@@ -328,10 +233,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new_event", new_event))
-    app.add_handler(CommandHandler("list_events", list_events))
-    app.add_handler(CommandHandler("clean_events", clean_events_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
