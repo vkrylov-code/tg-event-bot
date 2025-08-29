@@ -1,8 +1,185 @@
-# --- Flask и Telegram Application ---
+import os
+import html
+import logging
+from uuid import uuid4
+from datetime import datetime
+from dotenv import load_dotenv
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import BadRequest
+
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
+
+from flask import Flask, request
+
+# --- Загрузка переменных окружения ---
+load_dotenv()
+TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "/webhook")
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", 8443))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourdomain.com
+SSL_CERT = os.environ.get("SSL_CERT")  # /etc/letsencrypt/live/yourdomain.com/fullchain.pem
+SSL_KEY = os.environ.get("SSL_KEY")    # /etc/letsencrypt/live/yourdomain.com/privkey.pem
+
+if not all([TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_CERT, SSL_KEY]):
+    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_CERT, SSL_KEY required")
+
+# --- Логирование ---
+logging.basicConfig(filename="bot.log", level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+# --- Хранилище событий ---
+events = {}
+
+# --- Клавиатуры и форматирование ---
+def get_keyboard(event_id, show_delete=False):
+    event = events.get(event_id)
+    if not event:
+        return None
+    buttons = []
+    if not event.get("closed"):
+        buttons = [
+            [InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
+             InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
+             InlineKeyboardButton("🤔 Думаю", callback_data=f"{event_id}|Думаю")],
+            [InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
+             InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
+             InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор")]
+        ]
+    if show_delete:
+        buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
+def format_user_link(user_id: int, name: str) -> str:
+    safe = html.escape(name)
+    return f'<a href="tg://user?id={user_id}">{safe}</a>'
+
+def format_event(event_id: str) -> str:
+    event = events[event_id]
+    title = html.escape(event["text"])
+    parts = [f"<b>{title}</b>\n"]
+    lists = event["lists"]
+    plus_counts = event["plus_counts"]
+    user_names = event["user_names"]
+
+    lines_yes = [format_user_link(uid, user_names.get(uid,"User")) +
+                 (f" +{plus_counts.get(uid,0)}" if plus_counts.get(uid,0)>0 else "")
+                 for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x,""))]
+    anon_count = plus_counts.get("anon",0)
+    if anon_count > 0:
+        lines_yes.append(f"— +{anon_count}")
+    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines_yes) if lines_yes else "—"))
+
+    lines_no = [format_user_link(uid, user_names.get(uid,"User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x,""))]
+    parts.append("\n<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
+
+    lines_think = [format_user_link(uid, user_names.get(uid,"User")) for uid in sorted(lists["Думаю"], key=lambda x: user_names.get(x,""))]
+    parts.append("\n<b>🤔 Думаю:</b>\n" + ("\n".join(lines_think) if lines_think else "—"))
+
+    total_yes = len(lists["Я буду"]) + sum(plus_counts.get(uid,0) for uid in lists["Я буду"]) + plus_counts.get("anon",0)
+    total_no = len(lists["Я не иду"])
+    total_think = len(lists["Думаю"])
+    parts.append("\n-----------------")
+    parts.append(f"Всего идут: {total_yes}")
+    parts.append(f"✅ {total_yes}")
+    parts.append(f"❌ {total_no}")
+    parts.append(f"🤔 {total_think}")
+
+    if event.get("closed"):
+        parts.append("\n⚠️ Сбор закрыт.")
+    return "\n".join(parts)
+
+# --- Работа с БД ---
+def save_event(event_id, event):
+    event_copy = {**event, "lists": {k:list(v) for k,v in event["lists"].items()}}
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                data JSONB
+            )
+        """)
+        cur.execute("""
+            INSERT INTO events(event_id,data)
+            VALUES(%s,%s)
+            ON CONFLICT(event_id) DO UPDATE SET data=EXCLUDED.data
+        """, (event_id, Json(event_copy)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.exception("Ошибка сохранения события %s: %s", event_id, e)
+
+def load_events():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM events")
+        for row in cur.fetchall():
+            data = row["data"]
+            data["lists"] = {k:set(v) for k,v in data["lists"].items()}
+            events[row["event_id"]] = data
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.exception("Ошибка загрузки событий: %s", e)
+
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! /new_event создать событие")
+
+async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args) or "Событие без названия"
+    event_id = uuid4().hex
+    events[event_id] = {"text": text, "lists":{"Я буду":set(),"Я не иду":set(),"Думаю":set()}, "plus_counts":{}, "user_names":{}, "closed":False, "created_at":datetime.utcnow().isoformat()}
+    save_event(event_id, events[event_id])
+    await update.message.reply_text(format_event(event_id), parse_mode="HTML", reply_markup=get_keyboard(event_id))
+
+async def list_events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not events:
+        await update.message.reply_text("Событий пока нет.")
+        return
+    await update.message.reply_text("\n\n".join(format_event(eid) for eid in events), parse_mode="HTML")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    event_id, action = query.data.split("|",1)
+    user = query.from_user
+    if event_id not in events: return await query.edit_message_text("Событие недоступно.")
+    event = events[event_id]
+    changed=False
+    if action in ["Я буду","Я не иду","Думаю"]:
+        for lst in event["lists"].values(): lst.discard(user.id)
+        event["lists"][action].add(user.id)
+        event["user_names"][user.id] = user.full_name
+        changed=True
+    elif action=="Плюс":
+        if user.id in event["lists"]["Я буду"]: event["plus_counts"][user.id]=event["plus_counts"].get(user.id,0)+1
+        else: event["plus_counts"]["anon"]=event["plus_counts"].get("anon",0)+1
+        changed=True
+    elif action=="Минус":
+        if user.id in event["lists"]["Я буду"] and event["plus_counts"].get(user.id,0)>0: event["plus_counts"][user.id]-=1
+        elif event["plus_counts"].get("anon",0)>0: event["plus_counts"]["anon"]-=1
+        changed=True
+    elif action=="Закрыть сбор": event["closed"]=True; changed=True
+    elif action=="Удалить" and user.id==ADMIN_ID: events.pop(event_id,None); await query.edit_message_text("Удалено админом"); return
+    if changed:
+        save_event(event_id,event)
+        try: await query.edit_message_text(format_event(event_id), parse_mode="HTML", reply_markup=get_keyboard(event_id))
+        except BadRequest: pass
+
+# --- Flask + Telegram App ---
 app = Flask(__name__)
 telegram_app = Application.builder().token(TOKEN).build()
 
-# --- Инициализация Telegram App ---
 import asyncio
 async def init_app():
     await telegram_app.initialize()
@@ -15,23 +192,11 @@ async def init_app():
 
 asyncio.run(init_app())
 
-# --- Webhook route с мгновенной обработкой апдейтов ---
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
-    try:
-        if request.headers.get("content-type") == "application/json":
-            update_data = request.get_json(force=True)
-            update = Update.de_json(update_data, telegram_app.bot)
-            
-            # Обработка апдейта сразу
-            asyncio.run(telegram_app.process_update(update))
-
-            logger.info("✅ Update processed immediately")
-            return "ok"
-        return "Unsupported Media Type", 415
-    except Exception as e:
-        logger.exception("💥 Error in webhook: %s", e)
-        return "Internal Server Error", 500
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    asyncio.run(telegram_app.process_update(update))
+    return "ok"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8443, threaded=True)
+    app.run(host="0.0.0.0", port=WEBHOOK_PORT, ssl_context=(SSL_CERT, SSL_KEY), threaded=True)
