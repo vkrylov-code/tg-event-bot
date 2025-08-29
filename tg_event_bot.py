@@ -2,8 +2,10 @@ import os
 import html
 import logging
 from uuid import uuid4
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
+import threading
+import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -20,12 +22,10 @@ TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "/webhook")
-WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", 8443))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourdomain.com
-SSL_PATH = os.environ.get("SSL_PATH")  # /etc/letsencrypt/live/yourdomain.com
 
-if not TOKEN or not DATABASE_URL or not WEBHOOK_URL or not SSL_PATH:
-    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_PATH required")
+if not TOKEN or not DATABASE_URL or not WEBHOOK_URL:
+    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL required")
 
 # --- Логирование ---
 logging.basicConfig(filename="bot.log", level=logging.INFO,
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # --- Хранилище событий ---
 events = {}
 
-# --- Клавиатуры и форматирование (копируем из твоего кода) ---
+# --- Клавиатуры и форматирование ---
 def get_keyboard(event_id, show_delete=False):
     event = events.get(event_id)
     if not event:
@@ -108,7 +108,6 @@ def save_event(event_id, event):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-													   
         cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
@@ -130,7 +129,6 @@ def load_events():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-													   
         cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
@@ -161,18 +159,12 @@ def delete_event(event_id):
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    logger.info(f"/start от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
     await update.message.reply_text(
         "👋 Привет!\nЯ помогу организовать встречу или событие.\n"
         "Создать событие: /new_event Текст события"
     )
 
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    logger.info(f"/new_event от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")									  
     text = " ".join(context.args) or "Событие (без названия)"
     event_id = uuid4().hex
     events[event_id] = {
@@ -188,15 +180,10 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=get_keyboard(event_id))
 
 async def list_events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     if not events:
         await update.message.reply_text("Событий пока нет.")
         return
-
-    messages = []
-    for event_id in events:
-        messages.append(format_event(event_id))
-
+    messages = [format_event(event_id) for event_id in events]
     await update.message.reply_text("\n\n".join(messages), parse_mode="HTML")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,7 +237,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             pass
 
-# --- Flask сервер для webhook ---
+# --- Flask сервер ---
 app = Flask(__name__)
 telegram_app = Application.builder().token(TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
@@ -283,14 +270,14 @@ def webhook():
         logger.exception("💥 Error in webhook handler: %s", e)
         return "Internal Server Error", 500
 
-# --- Устанавливаем вебхук при старте ---
-import asyncio
+# --- Запуск Telegram Application в отдельном потоке ---
+def run_telegram_app():
+    asyncio.run(telegram_app.start())
+
+threading.Thread(target=run_telegram_app, daemon=True).start()
+
+# --- Устанавливаем вебхук ---
 asyncio.run(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"))
 
 if __name__ == "__main__":
-    # Flask сам по себе блокирующий, запускаем с threaded=True
-    app.run(
-        host="0.0.0.0",
-        port=8443,
-        threaded=True
-    )
+    app.run(host="0.0.0.0", port=8443, threaded=True)
