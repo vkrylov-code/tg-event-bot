@@ -207,16 +207,20 @@ telegram_app.add_handler(CommandHandler("new_event", new_event))
 telegram_app.add_handler(CommandHandler("list_events", list_events_handler))
 telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 
-# --- Создаем отдельный loop для Telegram ---
+# --- Event loop для Telegram ---
 bot_loop = asyncio.new_event_loop()
 asyncio.set_event_loop(bot_loop)
-bot_loop.create_task(telegram_app.initialize())
+
+async def init_bot():
+    await telegram_app.initialize()
+    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+
+bot_loop.run_until_complete(init_bot())
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        # Отправляем на обработку в loop бота
         asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
         return "ok"
     except Exception as e:
@@ -224,6 +228,4 @@ def webhook():
         return "Internal Server Error", 500
 
 if __name__ == "__main__":
-    # Устанавливаем webhook при старте
-    bot_loop.run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"))
     app.run(host="0.0.0.0", port=8443, threaded=True)
