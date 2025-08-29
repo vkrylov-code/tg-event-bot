@@ -4,6 +4,7 @@ import logging
 from uuid import uuid4
 from datetime import datetime
 from dotenv import load_dotenv
+import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,7 +14,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 from flask import Flask, request
-import asyncio
 
 # --- Загружаем .env ---
 load_dotenv()
@@ -27,7 +27,7 @@ if not TOKEN or not DATABASE_URL or not WEBHOOK_URL:
     raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL required")
 
 # --- Логирование ---
-logging.basicConfig(filename="bot.log", level=logging.INFO,
+logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -39,11 +39,6 @@ def get_keyboard(event_id, show_delete=False):
     event = events.get(event_id)
     if not event:
         return None
-    if event.get("closed"):
-        buttons = []
-        if show_delete:
-            buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
-        return InlineKeyboardMarkup(buttons) if buttons else None
 
     buttons = [
         [
@@ -91,10 +86,7 @@ def format_event(event_id: str) -> str:
     total_no = len(lists["Я не иду"])
     total_think = len(lists["Думаю"])
     parts.append("\n-----------------")
-    parts.append(f"Всего идут: {total_yes}")
-    parts.append(f"✅ {total_yes}")
-    parts.append(f"❌ {total_no}")
-    parts.append(f"🤔 {total_think}")
+    parts.append(f"✅ {total_yes}  ❌ {total_no}  🤔 {total_think}")
 
     if event.get("closed"):
         parts.append("\n⚠️ Сбор закрыт.")
@@ -107,7 +99,8 @@ def save_event(event_id, event):
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         cur.execute("""CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, data JSONB)""")
-        cur.execute("""INSERT INTO events(event_id,data) VALUES(%s,%s) ON CONFLICT(event_id) DO UPDATE SET data=EXCLUDED.data""",
+        cur.execute("""INSERT INTO events(event_id,data) VALUES(%s,%s)
+                       ON CONFLICT(event_id) DO UPDATE SET data=EXCLUDED.data""",
                     (event_id, Json(event_copy)))
         conn.commit()
         cur.close()
@@ -129,18 +122,6 @@ def load_events():
         conn.close()
     except Exception as e:
         logger.exception("Ошибка загрузки событий: %s", e)
-
-def delete_event(event_id):
-    events.pop(event_id,None)
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM events WHERE event_id=%s",(event_id,))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.exception("Ошибка удаления события %s: %s", event_id,e)
 
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,29 +154,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     event_id, action = query.data.split("|",1)
     user = query.from_user
-
     if event_id not in events:
         await query.edit_message_text("Событие больше недоступно.")
         return
-
     event = events[event_id]
     changed = False
-
     if action in ["Я буду","Я не иду","Думаю"]:
         for lst in event["lists"].values():
             lst.discard(user.id)
         event["lists"][action].add(user.id)
         event["user_names"][user.id] = user.full_name
-        if action != "Я буду" and user.id in event["plus_counts"]:
+        if action!="Я буду" and user.id in event["plus_counts"]:
             del event["plus_counts"][user.id]
         changed = True
-    elif action=="Плюс":
+    elif action == "Плюс":
         if user.id in event["lists"]["Я буду"]:
             event["plus_counts"][user.id] = event["plus_counts"].get(user.id,0)+1
         else:
             event["plus_counts"]["anon"] = event["plus_counts"].get("anon",0)+1
         changed = True
-    elif action=="Минус":
+    elif action == "Минус":
         if user.id in event["lists"]["Я буду"] and event["plus_counts"].get(user.id,0)>0:
             event["plus_counts"][user.id]-=1
             changed = True
@@ -204,14 +182,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
     elif action=="Закрыть сбор":
         event["closed"]=True
-        changed = True
+        changed=True
     elif action=="Удалить" and user.id==ADMIN_ID:
-        delete_event(event_id)
+        events.pop(event_id)
         await query.edit_message_text("Событие удалено администратором.")
         return
-
     if changed:
-        save_event(event_id, event)
+        save_event(event_id,event)
         try:
             await query.edit_message_text(format_event(event_id),
                                           parse_mode="HTML",
@@ -219,41 +196,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             pass
 
-# --- Flask сервер для webhook ---
+# --- Flask сервер ---
 app = Flask(__name__)
+load_events()
+
+# --- Telegram Application ---
 telegram_app = Application.builder().token(TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("new_event", new_event))
 telegram_app.add_handler(CommandHandler("list_events", list_events_handler))
 telegram_app.add_handler(CallbackQueryHandler(callback_handler))
-load_events()
 
-@app.before_request
-def log_request_info():
-    logger.info("📩 Request received: %s %s", request.method, request.url)
-    logger.info("Headers: %s", dict(request.headers))
-    try:
-        logger.info("Body: %s", request.get_data().decode("utf-8"))
-    except Exception as e:
-        logger.warning("Cannot decode body: %s", e)
+# --- Создаем отдельный loop для Telegram ---
+bot_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(bot_loop)
+bot_loop.create_task(telegram_app.initialize())
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        # Используем текущий event loop, не asyncio.run
-        loop = asyncio.get_running_loop()
-        loop.create_task(telegram_app.process_update(update))
+        # Отправляем на обработку в loop бота
+        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
         return "ok"
     except Exception as e:
         logger.exception("💥 Error in webhook handler: %s", e)
         return "Internal Server Error", 500
 
-# --- Устанавливаем вебхук при старте ---
-async def set_webhook():
-    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
-
-asyncio.run(set_webhook())
-
 if __name__ == "__main__":
+    # Устанавливаем webhook при старте
+    bot_loop.run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"))
     app.run(host="0.0.0.0", port=8443, threaded=True)
