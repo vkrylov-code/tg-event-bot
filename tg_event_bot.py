@@ -263,7 +263,6 @@ if __name__ == "__main__":
     # Flask сам по себе блокирующий, запускаем с threaded=True
     app.run(
         host="0.0.0.0",
-        port=8443,
-        ssl_context=(f"{SSL_PATH}/fullchain.pem", f"{SSL_PATH}/privkey.pem"),
+        port=8443
         threaded=True
     )
