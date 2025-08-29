@@ -142,11 +142,25 @@ async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=get_keyboard(event_id))
 
 async def list_events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    logger.info(f"/list_events от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Доступ запрещён.")
+        return
+
     if not events:
         await update.message.reply_text("Событий пока нет.")
         return
-    messages = [format_event(eid) for eid in events]
-    await update.message.reply_text("\n\n".join(messages), parse_mode="HTML")
+
+    for event_id, event in events.items():
+        keyboard = get_keyboard(event_id, show_delete=True)
+        await update.message.reply_text(
+            format_event(event_id),
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
