@@ -12,10 +12,9 @@ from telegram.error import BadRequest
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-from flask import Flask, request, abort
-import asyncio
+from flask import Flask, request
 
-# --- Загружаем .env ---
+# --- Настройки ---
 load_dotenv()
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
@@ -34,32 +33,28 @@ logger = logging.getLogger(__name__)
 # --- Хранилище событий ---
 events = {}
 
-# --- Функции клавиатуры и форматирования ---
+# --- Клавиатуры и форматирование ---
 def get_keyboard(event_id, show_delete=False):
     event = events.get(event_id)
     if not event:
         return None
-    if event.get("closed"):
-        buttons = []
-        if show_delete:
-            buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
-        return InlineKeyboardMarkup(buttons) if buttons else None
-
-    buttons = [
-        [
-            InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
-            InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
-            InlineKeyboardButton("🤔 Думаю", callback_data=f"{event_id}|Думаю"),
-        ],
-        [
-            InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
-            InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
-            InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор"),
+    buttons = []
+    if not event.get("closed"):
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
+                InlineKeyboardButton("❌ Я не иду", callback_data=f"{event_id}|Я не иду"),
+                InlineKeyboardButton("🤔 Думаю", callback_data=f"{event_id}|Думаю"),
+            ],
+            [
+                InlineKeyboardButton("➕ Плюс", callback_data=f"{event_id}|Плюс"),
+                InlineKeyboardButton("➖ Минус", callback_data=f"{event_id}|Минус"),
+                InlineKeyboardButton("🚫 Закрыть сбор", callback_data=f"{event_id}|Закрыть сбор"),
+            ]
         ]
-    ]
-    if show_delete:
+    if show_delete or event.get("closed"):
         buttons.append([InlineKeyboardButton("🗑 Удалить событие", callback_data=f"{event_id}|Удалить")])
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(buttons) if buttons else None
 
 def format_user_link(user_id: int, name: str) -> str:
     safe = html.escape(name)
@@ -73,13 +68,13 @@ def format_event(event_id: str) -> str:
     plus_counts = event["plus_counts"]
     user_names = event["user_names"]
 
-    lines = [format_user_link(uid, user_names.get(uid, "User")) +
-             (f" +{plus_counts.get(uid,0)}" if plus_counts.get(uid,0)>0 else "")
-             for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x,""))]
+    lines_yes = [format_user_link(uid, user_names.get(uid, "User")) +
+                 (f" +{plus_counts.get(uid,0)}" if plus_counts.get(uid,0)>0 else "")
+                 for uid in sorted(lists["Я буду"], key=lambda x: user_names.get(x,""))]
     anon_count = plus_counts.get("anon",0)
     if anon_count>0:
-        lines.append(f"— +{anon_count}")
-    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines) if lines else "—"))
+        lines_yes.append(f"— +{anon_count}")
+    parts.append("<b>✅ Я буду:</b>\n" + ("\n".join(lines_yes) if lines_yes else "—"))
 
     lines_no = [format_user_link(uid, user_names.get(uid,"User")) for uid in sorted(lists["Я не иду"], key=lambda x: user_names.get(x,""))]
     parts.append("\n<b>❌ Я не иду:</b>\n" + ("\n".join(lines_no) if lines_no else "—"))
@@ -95,7 +90,6 @@ def format_event(event_id: str) -> str:
     parts.append(f"✅ {total_yes}")
     parts.append(f"❌ {total_no}")
     parts.append(f"🤔 {total_think}")
-
     if event.get("closed"):
         parts.append("\n⚠️ Сбор закрыт.")
     return "\n".join(parts)
@@ -127,12 +121,6 @@ def load_events():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                event_id TEXT PRIMARY KEY,
-                data JSONB
-            )
-        """)
         cur.execute("SELECT * FROM events")
         for row in cur.fetchall():
             data = row["data"]
@@ -181,7 +169,7 @@ async def list_events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not events:
         await update.message.reply_text("Событий пока нет.")
         return
-    messages = [format_event(eid) for eid in events]
+    messages = [format_event(event_id) for event_id in events]
     await update.message.reply_text("\n\n".join(messages), parse_mode="HTML")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,7 +181,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Событие больше недоступно.")
         return
     event = events[event_id]
-    changed = False
+    changed=False
     if action in ["Я буду","Я не иду","Думаю"]:
         for lst in event["lists"].values():
             lst.discard(user.id)
@@ -231,26 +219,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             pass
 
-# --- Flask + Application ---
+# --- Flask сервер + Telegram Application ---
 app = Flask(__name__)
 telegram_app = Application.builder().token(TOKEN).build()
+telegram_app.initialize()  # ОБЯЗАТЕЛЬНО!
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("new_event", new_event))
 telegram_app.add_handler(CommandHandler("list_events", list_events_handler))
 telegram_app.add_handler(CallbackQueryHandler(callback_handler))
-
 load_events()
 
-# --- Вебхук обработка апдейтов напрямую ---
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     if request.headers.get("content-type") != "application/json":
         return "Unsupported Media Type", 415
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    asyncio.run(telegram_app.process_update(update))  # <-- сразу обработать
+    telegram_app.update_queue.put_nowait(update)
     return "ok"
 
-# --- Установка вебхука при старте ---
+# --- Устанавливаем вебхук при старте ---
+import asyncio
 asyncio.run(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"))
 
 if __name__ == "__main__":
