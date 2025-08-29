@@ -246,14 +246,29 @@ telegram_app.add_handler(CommandHandler("new_event", new_event))
 telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 load_events()
 
+@app.before_request
+def log_request_info():
+    logger.info("📩 Request received: %s %s", request.method, request.url)
+    logger.info("Headers: %s", dict(request.headers))
+    try:
+        logger.info("Body: %s", request.get_data().decode("utf-8"))
+    except Exception as e:
+        logger.warning("Cannot decode body: %s", e)
+
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
-    if request.headers.get("content-type") == "application/json":
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        telegram_app.update_queue.put_nowait(update)
-        return "ok"
-    else:
-        abort(403)
+    try:
+        if request.headers.get("content-type") == "application/json":
+            update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+            telegram_app.update_queue.put_nowait(update)
+            logger.info("✅ Update forwarded to Telegram app queue")
+            return "ok"
+        else:
+            logger.warning("❌ Wrong content-type: %s", request.headers.get("content-type"))
+            return "Unsupported Media Type", 415
+    except Exception as e:
+        logger.exception("💥 Error in webhook handler: %s", e)
+        return "Internal Server Error", 500
 
 # --- Устанавливаем вебхук при старте ---
 import asyncio
