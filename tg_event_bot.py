@@ -263,6 +263,6 @@ if __name__ == "__main__":
     # Flask сам по себе блокирующий, запускаем с threaded=True
     app.run(
         host="0.0.0.0",
-        port=8443
+        port=8443,
         threaded=True
     )
