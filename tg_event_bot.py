@@ -256,5 +256,9 @@ threading.Thread(target=run_telegram_app, daemon=True).start()
 
 # --- Flask запуск ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=WEBHOOK_PORT
-    ), threaded=True)
+    # Flask сам по себе блокирующий, запускаем с threaded=True
+    app.run(
+        host="0.0.0.0",
+        port=8443,
+        threaded=True
+    )
