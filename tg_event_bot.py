@@ -261,8 +261,9 @@ asyncio.run(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"))
 
 if __name__ == "__main__":
     # Flask сам по себе блокирующий, запускаем с threaded=True
-    app.run(host="0.0.0.0", port=443, ssl_context=(
-        f"{SSL_PATH}/fullchain.pem",
-        f"{SSL_PATH}/privkey.pem",
-            threaded=True)            
-)
+    app.run(
+        host="0.0.0.0",
+        port=443,
+        ssl_context=(f"{SSL_PATH}/fullchain.pem", f"{SSL_PATH}/privkey.pem"),
+        threaded=True
+    )
