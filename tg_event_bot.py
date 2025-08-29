@@ -22,11 +22,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "/webhook")
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", 8443))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourdomain.com
-SSL_CERT = os.environ.get("SSL_CERT")  # /etc/letsencrypt/live/yourdomain.com/fullchain.pem
-SSL_KEY = os.environ.get("SSL_KEY")    # /etc/letsencrypt/live/yourdomain.com/privkey.pem
 
-if not all([TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_CERT, SSL_KEY]):
-    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_CERT, SSL_KEY required")
+if not all([TOKEN, DATABASE_URL, WEBHOOK_URL]):
+    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL required")
 
 # --- Логирование ---
 logging.basicConfig(filename="bot.log", level=logging.INFO,
@@ -199,4 +197,4 @@ def webhook():
     return "ok"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=WEBHOOK_PORT, ssl_context=(SSL_CERT, SSL_KEY), threaded=True)
+    app.run(host="0.0.0.0", port=WEBHOOK_PORT, threaded=True)
