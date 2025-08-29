@@ -12,14 +12,20 @@ from telegram.error import BadRequest
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
+from flask import Flask, request
+
 # --- Загружаем .env ---
 load_dotenv()
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DATABASE_URL = os.environ.get("DATABASE_URL")
+WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "/webhook")
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", 8443))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://yourdomain.com
+SSL_PATH = os.environ.get("SSL_PATH")  # /etc/letsencrypt/live/yourdomain.com
 
-if not TOKEN or not DATABASE_URL:
-    raise SystemExit("BOT_TOKEN and DATABASE_URL required")
+if not TOKEN or not DATABASE_URL or not WEBHOOK_URL or not SSL_PATH:
+    raise SystemExit("BOT_TOKEN, DATABASE_URL, WEBHOOK_URL, SSL_PATH required")
 
 # --- Логирование ---
 logging.basicConfig(filename="bot.log", level=logging.INFO,
@@ -29,7 +35,7 @@ logger = logging.getLogger(__name__)
 # --- Хранилище событий ---
 events = {}
 
-# --- Клавиатуры ---
+# --- Клавиатуры и форматирование (копируем из твоего кода) ---
 def get_keyboard(event_id, show_delete=False):
     event = events.get(event_id)
     if not event:
@@ -102,7 +108,7 @@ def save_event(event_id, event):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        # создаём таблицу если нет
+													   
         cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
@@ -124,7 +130,7 @@ def load_events():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        # создаём таблицу если нет
+													   
         cur.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
@@ -166,7 +172,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def new_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    logger.info(f"/new_event от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")
+    logger.info(f"/new_event от {user.id} ({user.full_name}) в чате {chat.id} [{chat.title or chat.type}]")									  
     text = " ".join(context.args) or "Событие (без названия)"
     event_id = uuid4().hex
     events[event_id] = {
@@ -229,20 +235,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(format_event(event_id),
                                           parse_mode="HTML",
                                           reply_markup=get_keyboard(event_id))
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                pass
-            else:
-                raise
+        except BadRequest:
+            pass
 
-# --- Main ---
-def main():
-    load_events()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("new_event", new_event))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.run_polling()
+# --- Flask сервер для webhook ---
+app = Flask(__name__)
+telegram_app = Application.builder().token(TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("new_event", new_event))
+telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+load_events()
 
-if __name__=="__main__":
-    main()
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    telegram_app.update_queue.put(Update.de_json(request.get_json(force=True), telegram_app.bot))
+    return "OK"
+
+if __name__ == "__main__":
+    telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+    pp.run(
+    host="0.0.0.0", 
+    port=WEBHOOK_PORT, 
+    ssl_context=(
+        f"{SSL_PATH}/fullchain.pem",
+        f"{SSL_PATH}/privkey.pem"
+    )
+)
+					 
+
+						
+		  
