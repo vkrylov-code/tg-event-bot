@@ -253,7 +253,7 @@ def webhook():
 
 if __name__ == "__main__":
     telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
-    pp.run(
+    app.run(
     host="0.0.0.0", 
     port=WEBHOOK_PORT, 
     ssl_context=(
