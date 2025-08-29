@@ -4,7 +4,6 @@ import logging
 from uuid import uuid4
 from datetime import datetime
 from dotenv import load_dotenv
-import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,7 +12,7 @@ from telegram.error import BadRequest
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
-from flask import Flask, request
+from aiohttp import web
 
 # --- Загружаем .env ---
 load_dotenv()
@@ -39,7 +38,6 @@ def get_keyboard(event_id, show_delete=False):
     event = events.get(event_id)
     if not event:
         return None
-
     buttons = [
         [
             InlineKeyboardButton("✅ Я буду", callback_data=f"{event_id}|Я буду"),
@@ -196,36 +194,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             pass
 
-# --- Flask сервер ---
-app = Flask(__name__)
+# --- Инициализация бота ---
 load_events()
+application = Application.builder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("new_event", new_event))
+application.add_handler(CommandHandler("list_events", list_events_handler))
+application.add_handler(CallbackQueryHandler(callback_handler))
 
-# --- Telegram Application ---
-telegram_app = Application.builder().token(TOKEN).build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("new_event", new_event))
-telegram_app.add_handler(CommandHandler("list_events", list_events_handler))
-telegram_app.add_handler(CallbackQueryHandler(callback_handler))
-
-# --- Event loop для Telegram ---
-bot_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(bot_loop)
-
-async def init_bot():
-    await telegram_app.initialize()
-    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
-
-bot_loop.run_until_complete(init_bot())
-
-@app.route(WEBHOOK_PATH, methods=["POST"])
-def webhook():
+# --- Aiohttp вебхук ---
+async def handle_webhook(request):
     try:
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
-        return "ok"
-    except Exception as e:
-        logger.exception("💥 Error in webhook handler: %s", e)
-        return "Internal Server Error", 500
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response(text="ok")
+    except Exception:
+        logger.exception("Ошибка webhook")
+        return web.Response(status=500)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8443, threaded=True)
+app = web.Application()
+app.router.add_post(WEBHOOK_PATH, handle_webhook)
+
+# --- Установка webhook и запуск aiohttp ---
+async def main():
+    await application.initialize()
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8443)
+    await site.start()
+    logger.info("Бот запущен")
+    while True:
+        await asyncio.sleep(3600)  # держим процесс живым
+
+asyncio.run(main())
